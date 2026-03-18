@@ -119,16 +119,17 @@ public class WarehouseArtifact extends Environment {
      * Crea los robots iniciales
      */
     private void initializeRobots() {
+        // Posiciones iniciales: (1,4),(3,4),(5,4) - carriles x=1,x=3,x=5
         Robot light = new Robot("robot_light", "light", 10, 1, 1, 3);
-        light.setPosition(1, 3);
+        light.setPosition(1, 4);
         robots.put("robot_light", light);
-        
+
         Robot medium = new Robot("robot_medium", "medium", 30, 1, 2, 2);
-        medium.setPosition(2, 3);
+        medium.setPosition(3, 4);
         robots.put("robot_medium", medium);
-        
+
         Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
-        heavy.setPosition(3, 3);
+        heavy.setPosition(5, 4);
         robots.put("robot_heavy", heavy);
     }
     
@@ -196,10 +197,12 @@ public class WarehouseArtifact extends Environment {
                     
                     System.out.println("New container generated: " + container);
                     
-                    // Log a la consola de la GUI
+                    // Log a la consola de la GUI incluyendo dimensiones
                     if (view != null) {
-                        view.logMessage(String.format("🆕 New container: %s (%.1fkg, %s)", 
-                            container.getId(), container.getWeight(), container.getType()));
+                        view.logMessage(String.format("NEW  %s: %dx%d, %.1fkg, %s",
+                            container.getId(),
+                            container.getWidth(), container.getHeight(),
+                            container.getWeight(), container.getType()));
                     }
                     
                     // Notificar a los agentes
@@ -314,15 +317,28 @@ public class WarehouseArtifact extends Environment {
                 return false;
             }
             
-            // Verificar límites
+            // Verificar limites
             if (targetX < 0 || targetX >= GRID_WIDTH || targetY < 0 || targetY >= GRID_HEIGHT) {
                 addError(agName, "illegal_move", "Position out of bounds: (" + targetX + "," + targetY + ")");
                 return false;
             }
             
-            // Verificar si hay obstáculos (excepto estanterías que son destinos válidos)
+            // Verificar que el movimiento sea de maximo 1 paso (incluye diagonal: Chebyshev <= 1)
+            int dx = Math.abs(targetX - robot.getX());
+            int dy = Math.abs(targetY - robot.getY());
+            if (dx > 1 || dy > 1) {
+                addError(agName, "illegal_move", "Move too large (max 1 step): from ("
+                    + robot.getX() + "," + robot.getY() + ") to (" + targetX + "," + targetY + ")");
+                return false;
+            }
+            
+            // Verificar obstaculos: BLOCKED y SHELF (los robots no pueden pisar estanterias)
             if (grid[targetX][targetY] == CellType.BLOCKED) {
                 addError(agName, "route_blocked", "Position blocked: (" + targetX + "," + targetY + ")");
+                return false;
+            }
+            if (grid[targetX][targetY] == CellType.SHELF) {
+                addError(agName, "route_blocked", "Cannot enter shelf cell: (" + targetX + "," + targetY + ")");
                 return false;
             }
             
@@ -342,9 +358,24 @@ public class WarehouseArtifact extends Environment {
                 view.logMessage(String.format("➡️  %s moved to (%d,%d)", agName, targetX, targetY));
             }
             
-            // Actualizar percepción
+            // Actualizar percepcion privada del robot que se mueve
             removePerceptsByUnif(agName, Literal.parseLiteral("robot_at(_,_)"));
             addPercept(agName, Literal.parseLiteral("robot_at(" + targetX + "," + targetY + ")"));
+            
+            // Broadcast de posiciones de TODOS los robots a TODOS los agentes
+            // Permite que cada robot sepa donde estan los demas antes de moverse
+            for (Robot r : robots.values()) {
+                String rId = r.getId();
+                // Eliminar percepcion antigua de este robot en todos los agentes
+                removePerceptsByUnif("robot_light",  Literal.parseLiteral("other_pos(\"" + rId + "\",_,_)"));
+                removePerceptsByUnif("robot_medium", Literal.parseLiteral("other_pos(\"" + rId + "\",_,_)"));
+                removePerceptsByUnif("robot_heavy",  Literal.parseLiteral("other_pos(\"" + rId + "\",_,_)"));
+                // Agregar posicion actualizada
+                String posLiteral = "other_pos(\"" + rId + "\"," + r.getX() + "," + r.getY() + ")";
+                addPercept("robot_light",  Literal.parseLiteral(posLiteral));
+                addPercept("robot_medium", Literal.parseLiteral(posLiteral));
+                addPercept("robot_heavy",  Literal.parseLiteral(posLiteral));
+            }
             
             if (view != null) {
                 view.update();
@@ -451,6 +482,8 @@ public class WarehouseArtifact extends Environment {
             // Depositar
             shelf.store(container);
             robot.drop();
+            robot.setBusy(false);        // FIX: liberar robot para nuevas tareas
+            robot.setCurrentTask(null);
             container.setAssignedShelf(shelfId);
             
             totalContainersProcessed++;
@@ -492,26 +525,53 @@ public class WarehouseArtifact extends Environment {
                 return true;
             }
             
-            // Buscar contenedor pendiente
-            Container container = pendingContainers.poll();
+            // Buscar el contenedor OPTIMO para este robot especifico:
+            // Cada robot solo coge contenedores en su rango de capacidad exclusivo
+            // para evitar que heavy acapare trabajo de light/medium.
+            Container container = findBestContainerForRobot(robot);
             if (container == null) {
-                return true; // No hay tareas pendientes
+                return true; // No hay contenedor adecuado para este robot ahora
             }
             
-            // Verificar si el robot puede manejar el contenedor
-            if (!robot.canCarry(container)) {
-                // Devolver a la cola
-                pendingContainers.offer(container);
-                return true;
-            }
-            
-            // Buscar estantería apropiada
+            // Buscar estanteria apropiada para este contenedor especifico
             Shelf bestShelf = findBestShelf(container);
             if (bestShelf == null) {
-                // No hay estanterías disponibles, devolver a la cola
-                pendingContainers.offer(container);
-                addError(agName, "no_shelf_available", "No shelf available for container");
-                return true;
+                // No hay estanteria disponible para este contenedor ahora.
+                // En lugar de bloquearlo al frente de la cola, buscar si hay
+                // OTRO contenedor en la cola que si tenga estanteria disponible.
+                // Si no se encuentra ninguno, devolver este al final de la cola.
+                Container alternative = null;
+                Shelf altShelf = null;
+                List<Container> skipped = new java.util.ArrayList<>();
+                skipped.add(container); // ya lo sacamos, lo ponemos al final
+                
+                // Intentar con los siguientes contenedores de la cola
+                Container next;
+                while ((next = pendingContainers.poll()) != null) {
+                    if (robot.canCarry(next)) {
+                        Shelf s = findBestShelf(next);
+                        if (s != null) {
+                            alternative = next;
+                            altShelf = s;
+                            break;
+                        }
+                    }
+                    skipped.add(next);
+                }
+                
+                // Devolver todos los saltados al final de la cola (preservar orden)
+                for (Container c : skipped) {
+                    pendingContainers.offer(c);
+                }
+                
+                if (alternative == null) {
+                    // Ningun contenedor tiene estanteria disponible ahora
+                    return true;
+                }
+                
+                // Usar el contenedor alternativo
+                container = alternative;
+                bestShelf = altShelf;
             }
             
             // Asignar tarea
@@ -519,12 +579,29 @@ public class WarehouseArtifact extends Environment {
             robot.setBusy(true);
             robot.setCurrentTask(container.getId());
             
-            // Notificar al agente
+            // Notificar al agente con informacion de tamaño del contenedor
             addPercept(agName, Literal.parseLiteral(
                 "task(\"" + container.getId() + "\",\"" + bestShelf.getId() + "\")"
             ));
+            addPercept(agName, Literal.parseLiteral(
+                "container_size(\"" + container.getId() + "\"," +
+                container.getWidth() + "," + container.getHeight() + "," +
+                String.format("%.1f", container.getWeight()) + ",\"" + container.getType() + "\")"
+            ));
             
-            System.out.println("Task assigned to " + agName + ": " + container.getId() + " -> " + bestShelf.getId());
+            System.out.println("Task assigned to " + agName + ": " + container.getId() +
+                " [" + container.getWidth() + "x" + container.getHeight() +
+                ", " + String.format("%.1f", container.getWeight()) + "kg, " +
+                container.getType() + "] -> " + bestShelf.getId());
+            
+            // Log en GUI con dimensiones visibles
+            if (view != null) {
+                view.logMessage(String.format("TASK %s -> %s | %dx%d %.1fkg %s -> %s",
+                    agName, container.getId(),
+                    container.getWidth(), container.getHeight(),
+                    container.getWeight(), container.getType(),
+                    bestShelf.getId()));
+            }
             
             return true;
             
@@ -546,6 +623,76 @@ public class WarehouseArtifact extends Environment {
         return availableShelves.isEmpty() ? null : availableShelves.get(0);
     }
     
+    /**
+     * Encuentra el contenedor optimo para un robot especifico.
+     *
+     * REGLA: robot minimo suficiente.
+     *   - light  : busca en TODA la cola el primer contenedor que SOLO el puede cargar
+     *              (nadie mas pequeno puede -> trivialmente todos los que puede)
+     *   - medium : busca en TODA la cola el primer contenedor que light NO puede pero el SI
+     *   - heavy  : busca en TODA la cola el primer contenedor que ni light ni medium pueden
+     *
+     * Si no hay exclusivo disponible para este robot:
+     *   - light  : coge cualquiera que pueda
+     *   - medium : coge cualquiera que pueda (light tampoco podria o no esta disponible)
+     *   - heavy  : coge cualquiera que pueda (fallback para no quedarse idle)
+     *
+     * IMPORTANTE: busca en toda la cola, no solo el primero. Asi un contenedor
+     * grande al principio de la cola no impide que light/medium cojan uno pequeno
+     * que este mas atras.
+     */
+    private Container findBestContainerForRobot(Robot robot) {
+        List<Container> queue = new java.util.ArrayList<>(pendingContainers);
+        if (queue.isEmpty()) return null;
+
+        Robot light  = robots.get("robot_light");
+        Robot medium = robots.get("robot_medium");
+
+        // PASO 1: buscar contenedor exclusivo recorriendo TODA la cola
+        for (Container c : queue) {
+            if (!robot.canCarry(c)) continue;
+
+            boolean lightCan  = (light  != null) && light.canCarry(c);
+            boolean mediumCan = (medium != null) && medium.canCarry(c);
+
+            boolean isExclusive;
+            if (robot.getId().equals("robot_light")) {
+                // light coge todo lo que pueda (es el mas pequeno, siempre es "exclusivo")
+                isExclusive = true;
+            } else if (robot.getId().equals("robot_medium")) {
+                // medium solo coge lo que light NO puede manejar
+                isExclusive = !lightCan;
+            } else {
+                // heavy solo coge lo que ni light ni medium pueden
+                isExclusive = !lightCan && !mediumCan;
+            }
+
+            if (isExclusive) {
+                pendingContainers.remove(c);
+                return c;
+            }
+        }
+
+        // PASO 2: no hay exclusivo en toda la cola.
+        // NINGUN robot coge trabajo que corresponde a un robot menor.
+        // Heavy: espera hasta que haya contenedor que ni light ni medium puedan.
+        // Medium: puede coger lo que light no puede si no hay nada exclusivo suyo
+        //         (util cuando light esta ocupado o no hay contenedores pequenos).
+        // Light: ya es el mas pequeno, su exclusivo abarca todo lo que puede.
+        if (robot.getId().equals("robot_medium")) {
+            // medium fallback: cualquiera que pueda y que light NO pueda
+            for (Container c : queue) {
+                boolean lCan = (light != null) && light.canCarry(c);
+                if (robot.canCarry(c) && !lCan) {
+                    pendingContainers.remove(c);
+                    return c;
+                }
+            }
+        }
+        // heavy nunca coge trabajo de light o medium -> se queda idle
+        return null;
+    }
+
     /**
      * Acción: get_container_info(ContainerId)
      * Obtiene información sobre un contenedor
