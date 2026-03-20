@@ -67,13 +67,11 @@ carrying(none).      // Contenedor que está cargando
 
 // Ciclo de trabajo principal - más selectivo, solo grandes cargas
 +!work_cycle : state(idle) <-
-    .print("[HEAVY] Solicitando tarea especializada...");
-    request_task;
-    .wait(4000);  // Esperar más tiempo (robot más lento)
+    .wait(2000);           /* esperar sin llamar a request_task */
     !work_cycle.
 
 +!work_cycle : not state(idle) <-
-    .wait(3000);
+    .wait(2000);
     !work_cycle.
 
 /* ============================================================================
@@ -121,6 +119,8 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none);
     -task(CId, ShelfId).
+    .my_name(Me);
+    .send(scheduler, tell, task_complete(CId, Me)).
 
 // Navegar a la estantería (zona de estanterías grandes)
 +!navigate_to_shelf(ShelfId) : true <-
@@ -140,17 +140,23 @@ carrying(none).      // Contenedor que está cargando
     -+state(idle);
     -+carrying(none);
     -task(CId, _).
+    .my_name(Me);
+    .send(scheduler, tell, robot_error(Me, CId, container_too_heavy)).
 
 +error(container_too_big, Data) : carrying(CId) <-
     .print("❌ [HEAVY] ERROR: Contenedor muy grande - ", Data);
     -+state(idle);
     -+carrying(none);
     -task(CId, _).
+    .my_name(Me);
+    .send(scheduler, tell, robot_error(Me, CId, container_too_big)).
 
 +error(ErrorType, Data) : true <-
     .print("⚠️ [HEAVY] Error detectado: ", ErrorType, " - ", Data);
     -+state(idle);
     -+carrying(none).
+    .my_name(Me);
+    .send(scheduler, tell, robot_error(Me, CId, ErrorType)).
 
 +picked(CId) : true <-
     .print("✓ [HEAVY] Carga pesada ", CId, " asegurada correctamente").
