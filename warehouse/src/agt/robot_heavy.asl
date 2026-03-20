@@ -1,165 +1,119 @@
 /*******************************************************************************
- * ROBOT PESADO - Sistema de Gestión Logística de Almacén
- * 
- * Universidad de Vigo - Sistemas Inteligentes
- * Curso 2025-2026
- * 
- * CAPACIDADES:
- *   - Peso máximo: 100 kg
+ * ROBOT HEAVY - Robot pesado (100kg, 2×3)
+ *
+ * CARACTERÍSTICAS:
+ *   - Capacidad: 100 kg
  *   - Tamaño máximo: 2×3
  *   - Velocidad: Baja (1)
- * 
+ *   - Color GUI: Magenta
  ******************************************************************************/
 
-/* Estado inicial del robot */
-state(idle).         // Estados posibles: idle, moving, picking, carrying, dropping
-position(3,3).       // Posición inicial
-carrying(none).      // Contenedor que está cargando
-
-/* CARACTERÍSTICAS ESPECIALES:
- * - Único robot capaz de manejar contenedores > 30kg
- * - Puede transportar contenedores hasta 2×3
- * - Velocidad baja: debe optimizar rutas y minimizar movimientos
- * - Es un recurso escaso: debe usarse eficientemente
- */
-
 /* ============================================================================
- * PLANES PRINCIPALES
+ * CREENCIAS INICIALES
  * ============================================================================ */
 
-!start.
+state(idle).
+position(3, 3).          /* posición inicial en la GUI */
+robot_type(heavy).
+max_weight(100).
+max_width(2).
+max_height(3).
 
-// Plan inicial: Arrancar el robot y hacer pruebas de movimiento
+/* ============================================================================
+ * INICIALIZACIÓN
+ * ============================================================================ */
+
 +!start : true <-
-    .print("🤖 Robot pesado iniciado - Capacidad: 100kg, 2x3 [ESPECIALIZADO]");
-    .print("🔍 Iniciando secuencia de prueba de movimientos (más lento)...");
-    -+state(testing);
-    !test_movement;
-    !work_cycle.
-
-// Secuencia de prueba de movimientos (más lento, zonas de estanterías grandes)
-+!test_movement : true <-
-    .print("📍 Posición inicial: (3,3)");
-    .wait(2000);
-    
-    .print("➡️  Movimiento 1: Aproximación cuidadosa al área de entrada (2,2)");
-    move_to(2, 2);
-    .wait(3000);
-    
-    .print("➡️  Movimiento 2: Navegar a zona central (8,6)");
-    move_to(8, 6);
-    .wait(3000);
-    
-    .print("➡️  Movimiento 3: Ir a zona de estanterías GRANDES (12,11)");
-    move_to(12, 11);
-    .wait(3000);
-    
-    .print("➡️  Movimiento 4: Explorar más estanterías grandes (14,10)");
-    move_to(14, 10);
-    .wait(3000);
-    
-    .print("➡️  Movimiento 5: Retornar a zona segura (6,6)");
-    move_to(6, 6);
-    .wait(3000);
-    
-    .print("✅ [HEAVY] Prueba de movimientos completada. Robot pesado funcionando.");
-    -+state(idle).
-
-// Ciclo de trabajo principal - más selectivo, solo grandes cargas
-+!work_cycle : state(idle) <-
-    .wait(2000);           /* esperar sin llamar a request_task */
-    !work_cycle.
-
-+!work_cycle : not state(idle) <-
-    .wait(2000);
-    !work_cycle.
+    .print("[Robot-Heavy] ============================================");
+    .print("[Robot-Heavy] Robot pesado iniciado");
+    .print("[Robot-Heavy] Capacidad: 100kg, Tamaño: 2×3");
+    .print("[Robot-Heavy] Posición inicial: (3,3)");
+    .print("[Robot-Heavy] ============================================");
+    !main_loop.
 
 /* ============================================================================
- * MANEJO DE TAREAS ASIGNADAS
+ * CICLO PRINCIPAL
  * ============================================================================ */
 
-// Recibir tarea del scheduler
-+task(CId, ShelfId) : state(idle) <-
-    .print("✅ [HEAVY] Tarea especializada asignada: ", CId, " a ", ShelfId);
-    -+state(working);
-    -+carrying(CId);
-    !execute_task(CId, ShelfId).
++!main_loop : state(idle) <-
+    .print("[Robot-Heavy] 📡 Solicitando tarea...");
+    request_task();
+    .wait(2000);
+    !main_loop.
 
-+task(CId, ShelfId) : not state(idle) <-
-    .print("⚠️ [HEAVY] Ocupado con carga pesada, rechazando: ", CId).
++!main_loop : state(busy) <-
+    .print("[Robot-Heavy] 🏃‍♂️ Ocupado, trabajando...");
+    .wait(2000);
+    !main_loop.
 
-// Ejecutar la tarea completa - movimientos más lentos pero precisos
-+!execute_task(CId, ShelfId) : true <-
-    .print("🚀 [HEAVY] Iniciando transporte de carga pesada: ", CId);
+/* ============================================================================
+ * RECEPCIÓN Y EJECUCIÓN DE TAREAS
+ * ============================================================================ */
+
++task(ContainerId, ShelfId)[source(scheduler)] : state(idle) <-
+    .print("[Robot-Heavy] 📦 Tarea recibida: ", ContainerId, " → ", ShelfId);
+    -+state(busy);
+    +current_container(ContainerId);
+    +current_shelf(ShelfId);
+    !execute_task(ContainerId, ShelfId).
+
++!execute_task(ContainerId, ShelfId) : true <-
+    .print("[Robot-Heavy] 🚀 Ejecutando tarea para ", ContainerId);
     
-    // Fase 1: Aproximación cuidadosa al área de entrada
-    .print("📍 [HEAVY] Fase 1: Aproximación al área de entrada");
+    get_container_info(ContainerId);
+    .wait(500);
+    
+    .print("[Robot-Heavy] 📍 Objetivo: estantería ", ShelfId);
+    
+    .print("[Robot-Heavy] 🚶 Moviéndose a zona de entrada...");
     move_to(1, 1);
-    .wait(1000);  // Robot pesado es más lento
-    
-    // Fase 2: Recoger el contenedor pesado
-    .print("📦 [HEAVY] Fase 2: Recogiendo contenedor pesado ", CId);
-    -+state(picking);
-    pickup(CId);
     .wait(1000);
     
-    // Fase 3: Transporte lento pero seguro
-    .print("🚚 [HEAVY] Fase 3: Transportando carga pesada a ", ShelfId);
-    -+state(carrying);
-    !navigate_to_shelf(ShelfId);
+    .print("[Robot-Heavy] 🎯 Recogiendo ", ContainerId);
+    pickup(ContainerId);
+    .wait(1000);
     
-    // Fase 4: Depositar con cuidado
-    .print("📥 [HEAVY] Fase 4: Depositando carga en ", ShelfId);
-    -+state(dropping);
+    .print("[Robot-Heavy] 🚶 Moviéndose a estantería ", ShelfId);
+    move_to(12, 5);
+    .wait(1000);
+    
+    .print("[Robot-Heavy] 📦 Depositando en ", ShelfId);
     drop_at(ShelfId);
     .wait(1000);
     
-    // Fase 5: Completar y volver a idle
-    .print("✨ [HEAVY] Tarea especializada completada: ", CId);
-    -+state(idle);
-    -+carrying(none);
-    -task(CId, ShelfId).
     .my_name(Me);
-    .send(scheduler, tell, task_complete(CId, Me)).
+    .send(scheduler, tell, task_complete(ContainerId, Me));
+    
+    .print("[Robot-Heavy] ✅ Tarea completada: ", ContainerId);
+    -+state(idle);
+    -current_container(ContainerId);
+    -current_shelf(ShelfId).
 
-// Navegar a la estantería (zona de estanterías grandes)
-+!navigate_to_shelf(ShelfId) : true <-
-    // Estanterías grandes están en y=10-12
-    move_to(12, 10);
-    .wait(1000);  // Movimiento más lento por el peso
-    move_to(14, 11);
-    .wait(1000).
+/* ============================================================================
+ * ACTUALIZACIÓN DE POSICIÓN
+ * ============================================================================ */
+
++robot_at(X, Y) : true <-
+    -+position(X, Y);
+    .print("[Robot-Heavy] 📍 Posición actualizada: (", X, ",", Y, ")").
 
 /* ============================================================================
  * MANEJO DE ERRORES
  * ============================================================================ */
 
-+error(container_too_heavy, Data) : carrying(CId) <-
-    .print("❌ [HEAVY] ERROR CRÍTICO: Contenedor excede capacidad máxima - ", Data);
-    .print("⚠️ Este es el robot más fuerte, contenedor imposible de transportar");
-    -+state(idle);
-    -+carrying(none);
-    -task(CId, _).
++error(ErrorType, Data) : state(busy) <-
+    .print("[Robot-Heavy] ❌ ERROR: ", ErrorType, " - ", Data);
     .my_name(Me);
-    .send(scheduler, tell, robot_error(Me, CId, container_too_heavy)).
-
-+error(container_too_big, Data) : carrying(CId) <-
-    .print("❌ [HEAVY] ERROR: Contenedor muy grande - ", Data);
+    ?current_container(CId);
+    .send(scheduler, tell, robot_error(Me, CId, ErrorType));
     -+state(idle);
-    -+carrying(none);
-    -task(CId, _).
+    -current_container(CId);
+    -current_shelf(_).
+
++error(ErrorType, Data) : state(idle) <-
+    .print("[Robot-Heavy] ❌ ERROR (idle): ", ErrorType, " - ", Data);
     .my_name(Me);
-    .send(scheduler, tell, robot_error(Me, CId, container_too_big)).
+    .send(scheduler, tell, robot_error(Me, "none", ErrorType)).
 
-+error(ErrorType, Data) : true <-
-    .print("⚠️ [HEAVY] Error detectado: ", ErrorType, " - ", Data);
-    -+state(idle);
-    -+carrying(none).
-    .my_name(Me);
-    .send(scheduler, tell, robot_error(Me, CId, ErrorType)).
-
-+picked(CId) : true <-
-    .print("✓ [HEAVY] Carga pesada ", CId, " asegurada correctamente").
-
-+stored(CId, ShelfId) : true <-
-    .print("✓ [HEAVY] Carga pesada ", CId, " almacenada en ", ShelfId).
++container_info(CId, W, H, Weight, Type) : true <-
+    .print("[Robot-Heavy] 📊 Info ", CId, ": ", Weight, "kg, ", W, "x", H, ", ", Type).
