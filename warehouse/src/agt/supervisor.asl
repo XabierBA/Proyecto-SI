@@ -1,104 +1,70 @@
-/*******************************************************************************
- * SUPERVISOR - Monitor y gestor de errores del sistema
- *
- * Universidad de Vigo - Sistemas Inteligentes - Curso 2025-2026
- *
- * RESPONSABILIDADES:
- *   1. Monitorizar el estado general del sistema
- *   2. Recibir y registrar errores de robots y scheduler
- *   3. Generar reportes periódicos
- *   4. Detectar situaciones anómalas (robots bloqueados, etc.)
- ******************************************************************************/
+errores(0).
+urgentes_procesados(0).
+fragiles_procesados(0).
+standard_procesados(0).
 
-/* ============================================================================
- * CREENCIAS INICIALES
- * ============================================================================ */
+!start.
 
-error_count(0).
-report_interval(30).     /* segundos entre reportes automáticos */
-last_report(0).
++!start
+    <- .print("[Supervisor] Iniciado - Sistema de monitorización");
+       .print("[Supervisor] Reportes cada 30 segundos");
+       !monitor_loop.
 
-/* ============================================================================
- * INICIALIZACIÓN
- * ============================================================================ */
++!monitor_loop
+    <- .wait(30000);
+       !generar_reporte;
+       !monitor_loop.
 
-+!start : true <-
-    .print("[Supervisor] ============================================");
-    .print("[Supervisor] Sistema de monitorización iniciado");
-    .print("[Supervisor] Reportes automáticos cada 30 segundos");
-    .print("[Supervisor] ============================================");
-    !monitoring_loop.
++!generar_reporte
+    <- ?errores(E);
+       ?urgentes_procesados(U);
+       ?fragiles_procesados(F);
+       ?standard_procesados(S);
+       .time(T);
+       .print("");
+       .print("========== REPORTE DEL SISTEMA ==========");
+       .print("Tiempo: ", T, " segundos");
+       .print("----------------------------------------");
+       .print("Contenedores procesados:");
+       .print("  - Standard: ", S);
+       .print("  - Fragile:  ", F);
+       .print("  - Urgent:   ", U);
+       .print("----------------------------------------");
+       .print("Total errores: ", E);
+       .print("========================================");
+       .print("");
+       .send(scheduler, achieve, estado).
 
-/* ============================================================================
- * CICLO DE MONITORIZACIÓN
- * ============================================================================ */
++robot_error(Robot,CId,Tipo)[source(_)]
+    <- +errores(N);
+       -errores(N);
+       +errores(N+1);
+       .time(T);
+       .print("[Supervisor] [", T, "] ERROR: ", Robot, " - ", Tipo, " - ", CId).
 
-+!monitoring_loop : true <-
-    .print("[Supervisor] 🔍 Monitorizando sistema...");
-    .wait(5000);                      /* cada 5 segundos */
-    !monitoring_loop.
++container_info(CId,W,H,Peso,standard)
+    <- +standard_procesados(N);
+       -standard_procesados(N);
+       +standard_procesados(N+1).
 
-/* ============================================================================
- * REPORTE PERIÓDICO
- * ============================================================================ */
++container_info(CId,W,H,Peso,fragile)
+    <- +fragiles_procesados(N);
+       -fragiles_procesados(N);
+       +fragiles_procesados(N+1).
 
-/* Cada 30 segundos, solicitar estado al scheduler */
-+!generate_report : true <-
-    .time(T);
-    ?last_report(LR);
-    ?report_interval(RI);
-    T - LR >= RI & T - LR < RI + 2 <-  /* margen para evitar múltiples disparos */
-    .print("[Supervisor] 📊 Generando reporte periódico...");
-    .send(scheduler, achieve, print_status);
-    -+last_report(T).
++container_info(CId,W,H,Peso,urgent)
+    <- +urgentes_procesados(N);
+       -urgentes_procesados(N);
+       +urgentes_procesados(N+1).
 
-/* ============================================================================
- * RECEPCIÓN DE ERRORES
- * ============================================================================ */
-
-/* Error de robot */
-+robot_error(Robot, CId, ErrorType)[source(_)] : true <-
-    ?error_count(N);
-    -error_count(N);
-    +error_count(N+1);
-    .time(T);
-    .print("[Supervisor] ❌ ERROR REGISTRADO [", T, "]: ", 
-           Robot, " - ", ErrorType, " - Contenedor: ", CId);
-    
-    /* Detectar patrones de error */
-    +error_log(ErrorType, Robot, CId, T).
-
-/* Error del scheduler (si envía alguno) */
-+error(ErrorType, Data)[source(scheduler)] : true <-
-    ?error_count(N);
-    -error_count(N);
-    +error_count(N+1);
-    .print("[Supervisor] ❌ ERROR SCHEDULER: ", ErrorType, " - ", Data).
-
-/* ============================================================================
- * ANÁLISIS DE ERRORES
- * ============================================================================ */
-
-/* Detectar muchos errores del mismo tipo */
-+!analyze_errors : error_count(N) & N > 10 <-
-    .print("[Supervisor] ⚠️ ALERTA: Se han registrado ", N, " errores totales");
-    .print("[Supervisor] Se recomienda revisar la configuración del sistema").
-
-/* ============================================================================
- * COMANDOS EXTERNOS
- * ============================================================================ */
-
-/* Solicitar reporte manual */
-+!report : true <-
-    ?error_count(E);
-    .print("[Supervisor] 📊 REPORTE MANUAL");
-    .print("[Supervisor] Total errores: ", E);
-    .send(scheduler, achieve, print_status).
-
-/* ============================================================================
- * INFORMACIÓN DE ESTADO DE ROBOTS (opcional)
- * ============================================================================ */
-
-/* Escuchar estado de robots desde scheduler */
-+robot_status(Robot, Status)[source(scheduler)] : true <-
-    .print("[Supervisor] 🤖 Estado de ", Robot, ": ", Status).
++!reporte
+    <- ?errores(E);
+       ?urgentes_procesados(U);
+       ?fragiles_procesados(F);
+       ?standard_procesados(S);
+       .print("");
+       .print("========== REPORTE MANUAL ==========");
+       .print("Standard: ", S, " | Fragile: ", F, " | Urgent: ", U);
+       .print("Errores totales: ", E);
+       .print("====================================");
+       .send(scheduler, achieve, estado).

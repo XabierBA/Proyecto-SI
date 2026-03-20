@@ -1,119 +1,95 @@
-/*******************************************************************************
- * ROBOT MEDIUM - Robot mediano (30kg, 1×2)
- *
- * CARACTERÍSTICAS:
- *   - Capacidad: 30 kg
- *   - Tamaño máximo: 1×2
- *   - Velocidad: Media (2)
- *   - Color GUI: Azul
- ******************************************************************************/
-
-/* ============================================================================
- * CREENCIAS INICIALES
- * ============================================================================ */
-
 state(idle).
-position(2, 3).          /* posición inicial en la GUI */
-robot_type(medium).
-max_weight(30).
-max_width(1).
-max_height(2).
+position(2,3).
 
-/* ============================================================================
- * INICIALIZACIÓN
- * ============================================================================ */
+!start.
 
-+!start : true <-
-    .print("[Robot-Medium] ============================================");
-    .print("[Robot-Medium] Robot mediano iniciado");
-    .print("[Robot-Medium] Capacidad: 30kg, Tamaño: 1×2");
-    .print("[Robot-Medium] Posición inicial: (2,3)");
-    .print("[Robot-Medium] ============================================");
-    !main_loop.
++!start
+    <- .print("[Robot-Medium] Iniciado - Capacidad 30kg, tamaño 1x2");
+       !main_loop.
 
-/* ============================================================================
- * CICLO PRINCIPAL
- * ============================================================================ */
++!main_loop : state(idle)
+    <- .print("[Robot-Medium] Solicitando tarea...");
+       request_task();
+       .wait(2000);
+       !main_loop.
 
-+!main_loop : state(idle) <-
-    .print("[Robot-Medium] 📡 Solicitando tarea...");
-    request_task();
-    .wait(2000);
-    !main_loop.
++!main_loop : state(busy)
+    <- .wait(1000);
+       !main_loop.
 
-+!main_loop : state(busy) <-
-    .print("[Robot-Medium] 🏃‍♂️ Ocupado, trabajando...");
-    .wait(2000);
-    !main_loop.
++task(CId, ShelfId)[source(scheduler)] : state(idle)
+    <- .print("[Robot-Medium] Tarea recibida: ", CId, " -> ", ShelfId);
+       -+state(busy);
+       +current_container(CId);
+       +target_shelf(ShelfId);
+       !execute_task(CId, ShelfId).
 
-/* ============================================================================
- * RECEPCIÓN Y EJECUCIÓN DE TAREAS
- * ============================================================================ */
++!execute_task(CId, ShelfId)
+    <- get_container_info(CId);
+       .wait(500);
+       .print("[Robot-Medium] Moviendo a zona de entrada");
+       move_to(1,1);
+       .wait(1000);
+       .print("[Robot-Medium] Recogiendo ", CId);
+       pickup(CId);
+       .wait(1000);
+       .print("[Robot-Medium] Moviendo a estantería");
+       move_to(12,5);
+       .wait(1000);
+       .print("[Robot-Medium] Depositando");
+       drop_at(ShelfId);
+       .wait(1000);
+       .my_name(Me);
+       .send(scheduler, tell, task_complete(CId, Me));
+       .print("[Robot-Medium] Tarea completada!");
+       -+state(idle);
+       -current_container(CId);
+       -target_shelf(ShelfId).
 
-+task(ContainerId, ShelfId)[source(scheduler)] : state(idle) <-
-    .print("[Robot-Medium] 📦 Tarea recibida: ", ContainerId, " → ", ShelfId);
-    -+state(busy);
-    +current_container(ContainerId);
-    +current_shelf(ShelfId);
-    !execute_task(ContainerId, ShelfId).
++robot_at(X,Y)
+    <- -+position(X,Y);
+       .print("[Robot-Medium] Posición: (", X, ",", Y, ")").
 
-+!execute_task(ContainerId, ShelfId) : true <-
-    .print("[Robot-Medium] 🚀 Ejecutando tarea para ", ContainerId);
-    
-    get_container_info(ContainerId);
-    .wait(500);
-    
-    .print("[Robot-Medium] 📍 Objetivo: estantería ", ShelfId);
-    
-    .print("[Robot-Medium] 🚶 Moviéndose a zona de entrada...");
-    move_to(1, 1);
-    .wait(1000);
-    
-    .print("[Robot-Medium] 🎯 Recogiendo ", ContainerId);
-    pickup(ContainerId);
-    .wait(1000);
-    
-    .print("[Robot-Medium] 🚶 Moviéndose a estantería ", ShelfId);
-    move_to(12, 5);
-    .wait(1000);
-    
-    .print("[Robot-Medium] 📦 Depositando en ", ShelfId);
-    drop_at(ShelfId);
-    .wait(1000);
-    
-    .my_name(Me);
-    .send(scheduler, tell, task_complete(ContainerId, Me));
-    
-    .print("[Robot-Medium] ✅ Tarea completada: ", ContainerId);
-    -+state(idle);
-    -current_container(ContainerId);
-    -current_shelf(ShelfId).
++error(container_too_heavy, Data) : state(busy)
+    <- .print("[Robot-Medium] ERROR: Contenedor muy pesado");
+       .my_name(Me);
+       ?current_container(CId);
+       .send(scheduler, tell, robot_error(Me, CId, container_too_heavy));
+       -+state(idle);
+       -current_container(CId).
 
-/* ============================================================================
- * ACTUALIZACIÓN DE POSICIÓN
- * ============================================================================ */
++error(container_too_big, Data) : state(busy)
+    <- .print("[Robot-Medium] ERROR: Contenedor muy grande");
+       .my_name(Me);
+       ?current_container(CId);
+       .send(scheduler, tell, robot_error(Me, CId, container_too_big));
+       -+state(idle);
+       -current_container(CId).
 
-+robot_at(X, Y) : true <-
-    -+position(X, Y);
-    .print("[Robot-Medium] 📍 Posición actualizada: (", X, ",", Y, ")").
++error(conflict, Data) : state(busy)
+    <- .print("[Robot-Medium] ERROR: Colisión detectada, reintentando");
+       .wait(2000);
+       ?current_container(CId);
+       ?target_shelf(ShelfId);
+       !execute_task(CId, ShelfId).
 
-/* ============================================================================
- * MANEJO DE ERRORES
- * ============================================================================ */
++error(route_blocked, Data) : state(busy)
+    <- .print("[Robot-Medium] ERROR: Ruta bloqueada, buscando alternativa");
+       .wait(1000);
+       ?current_container(CId);
+       ?target_shelf(ShelfId);
+       !execute_task(CId, ShelfId).
 
-+error(ErrorType, Data) : state(busy) <-
-    .print("[Robot-Medium] ❌ ERROR: ", ErrorType, " - ", Data);
-    .my_name(Me);
-    ?current_container(CId);
-    .send(scheduler, tell, robot_error(Me, CId, ErrorType));
-    -+state(idle);
-    -current_container(CId);
-    -current_shelf(_).
++error(shelf_full, Data) : state(busy)
+    <- .print("[Robot-Medium] ERROR: Estantería llena");
+       .my_name(Me);
+       ?current_container(CId);
+       .send(scheduler, tell, robot_error(Me, CId, shelf_full));
+       -+state(idle);
+       -current_container(CId).
 
-+error(ErrorType, Data) : state(idle) <-
-    .print("[Robot-Medium] ❌ ERROR (idle): ", ErrorType, " - ", Data);
-    .my_name(Me);
-    .send(scheduler, tell, robot_error(Me, "none", ErrorType)).
-
-+container_info(CId, W, H, Weight, Type) : true <-
-    .print("[Robot-Medium] 📊 Info ", CId, ": ", Weight, "kg, ", W, "x", H, ", ", Type).
++error(Tipo, Data)
+    <- .print("[Robot-Medium] ERROR: ", Tipo);
+       .my_name(Me);
+       .send(scheduler, tell, robot_error(Me, none, Tipo));
+       -+state(idle).

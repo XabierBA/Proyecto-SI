@@ -1,149 +1,92 @@
-/*******************************************************************************
- * ROBOT LIGHT - Robot ligero (10kg, 1×1)
- *
- * Universidad de Vigo - Sistemas Inteligentes - Curso 2025-2026
- *
- * CARACTERÍSTICAS:
- *   - Capacidad: 10 kg
- *   - Tamaño máximo: 1×1
- *   - Velocidad: Alta (3)
- *   - Color GUI: Verde
- *
- * RESPONSABILIDADES:
- *   1. Mantener estado (idle/busy)
- *   2. Solicitar tareas cuando está idle
- *   3. Ejecutar tareas recibidas del scheduler
- *   4. Notificar al scheduler cuando completa una tarea
- *   5. Manejar errores y notificarlos
- ******************************************************************************/
-
-/* ============================================================================
- * CREENCIAS INICIALES
- * ============================================================================ */
-
 state(idle).
-position(1, 3).          /* posición inicial en la GUI */
-robot_type(light).
-max_weight(10).
-max_width(1).
-max_height(1).
+position(1,3).
 
-/* ============================================================================
- * INICIALIZACIÓN
- * ============================================================================ */
+!start.
 
-+!start : true <-
-    .print("[Robot-Light] ============================================");
-    .print("[Robot-Light] Robot ligero iniciado");
-    .print("[Robot-Light] Capacidad: 10kg, Tamaño: 1x1");
-    .print("[Robot-Light] Posición inicial: (1,3)");
-    .print("[Robot-Light] ============================================");
-    !main_loop.
++!start
+    <- .print("[Robot-Light] Iniciado - Capacidad 10kg, tamaño 1x1");
+       !main_loop.
 
-/* ============================================================================
- * CICLO PRINCIPAL
- * ============================================================================ */
++!main_loop : state(idle)
+    <- .print("[Robot-Light] Solicitando tarea...");
+       request_task();
+       .wait(2000);
+       !main_loop.
 
-/* Estado idle → solicitar tarea */
-+!main_loop : state(idle) <-
-    .print("[Robot-Light] 📡 Solicitando tarea...");
-    request_task();
-    .wait(2000);                    /* esperar respuesta */
-    !main_loop.
++!main_loop : state(busy)
+    <- .wait(1000);
+       !main_loop.
 
-/* Estado busy → esperar mientras trabaja */
-+!main_loop : state(busy) <-
-    .print("[Robot-Light] 🏃‍♂️ Ocupado, trabajando...");
-    .wait(2000);
-    !main_loop.
++task(CId, ShelfId)[source(scheduler)] : state(idle)
+    <- .print("[Robot-Light] Tarea recibida: ", CId, " -> ", ShelfId);
+       -+state(busy);
+       +current_container(CId);
+       +target_shelf(ShelfId);
+       !get_shelf_position(ShelfId).
 
-/* ============================================================================
- * RECEPCIÓN Y EJECUCIÓN DE TAREAS
- * ============================================================================ */
++!get_shelf_position(ShelfId)
+    <- .print("[Robot-Light] Buscando posición de ", ShelfId);
+       /* Por ahora usamos posición fija, idealmente habría que consultar al entorno */
+       !execute_task(CId, 12, 5).
 
-/* Recibir nueva tarea del scheduler */
-+task(ContainerId, ShelfId)[source(scheduler)] : state(idle) <-
-    .print("[Robot-Light] 📦 Tarea recibida: ", ContainerId, " → ", ShelfId);
-    -+state(busy);
-    +current_container(ContainerId);
-    +current_shelf(ShelfId);
-    !execute_task(ContainerId, ShelfId).
++!execute_task(CId, ShelfX, ShelfY)
+    <- get_container_info(CId);
+       .wait(500);
+       .print("[Robot-Light] Moviendo a zona de entrada");
+       move_to(1,1);
+       .wait(1000);
+       .print("[Robot-Light] Recogiendo ", CId);
+       pickup(CId);
+       .wait(1000);
+       .print("[Robot-Light] Moviendo a estantería en (", ShelfX, ",", ShelfY, ")");
+       move_to(ShelfX, ShelfY);
+       .wait(1000);
+       .print("[Robot-Light] Depositando");
+       drop_at(ShelfId);
+       .wait(1000);
+       .my_name(Me);
+       .send(scheduler, tell, task_complete(CId, Me));
+       .print("[Robot-Light] Tarea completada!");
+       -+state(idle);
+       -current_container(CId);
+       -target_shelf(ShelfId).
 
-/* Ejecutar tarea completa */
-+!execute_task(ContainerId, ShelfId) : true <-
-    .print("[Robot-Light] 🚀 Ejecutando tarea para ", ContainerId);
-    
-    /* Paso 1: Obtener información del contenedor */
-    get_container_info(ContainerId);
-    .wait(500);
-    
-    /* Paso 2: Obtener estantería libre (si no la tenemos) */
-    // ShelfId ya viene en la tarea, pero podemos verificar si es válida
-    .print("[Robot-Light] 📍 Objetivo: estantería ", ShelfId);
-    
-    /* Paso 3: Moverse al contenedor (zona de entrada) */
-    .print("[Robot-Light] 🚶 Moviéndose a zona de entrada...");
-    move_to(1, 1);                   /* posición estándar de contenedores */
-    .wait(1000);
-    
-    /* Paso 4: Recoger contenedor */
-    .print("[Robot-Light] 🎯 Recogiendo ", ContainerId);
-    pickup(ContainerId);
-    .wait(1000);
-    
-    /* Paso 5: Moverse a la estantería */
-    .print("[Robot-Light] 🚶 Moviéndose a estantería ", ShelfId);
-    // En una implementación real, necesitaríamos la posición de la estantería
-    // Por ahora, movemos a una posición fija cerca de las estanterías
-    move_to(12, 5);
-    .wait(1000);
-    
-    /* Paso 6: Depositar contenedor */
-    .print("[Robot-Light] 📦 Depositando en ", ShelfId);
-    drop_at(ShelfId);
-    .wait(1000);
-    
-    /* Paso 7: Notificar al scheduler que completó la tarea */
-    .my_name(Me);
-    .send(scheduler, tell, task_complete(ContainerId, Me));
-    
-    .print("[Robot-Light] ✅ Tarea completada: ", ContainerId);
-    -+state(idle);
-    -current_container(ContainerId);
-    -current_shelf(ShelfId).
++robot_at(X,Y)
+    <- -+position(X,Y);
+       .print("[Robot-Light] Posición: (", X, ",", Y, ")").
 
-/* ============================================================================
- * ACTUALIZACIÓN DE POSICIÓN
- * ============================================================================ */
++error(container_too_heavy, Data) : state(busy)
+    <- .print("[Robot-Light] ERROR: Contenedor muy pesado");
+       .my_name(Me);
+       ?current_container(CId);
+       .send(scheduler, tell, robot_error(Me, CId, container_too_heavy));
+       -+state(idle);
+       -current_container(CId).
 
-/* El entorno envía robot_at(X,Y) después de cada move_to */
-+robot_at(X, Y) : true <-
-    -+position(X, Y);
-    .print("[Robot-Light] 📍 Posición actualizada: (", X, ",", Y, ")").
++error(container_too_big, Data) : state(busy)
+    <- .print("[Robot-Light] ERROR: Contenedor muy grande");
+       .my_name(Me);
+       ?current_container(CId);
+       .send(scheduler, tell, robot_error(Me, CId, container_too_big));
+       -+state(idle);
+       -current_container(CId).
 
-/* ============================================================================
- * MANEJO DE ERRORES
- * ============================================================================ */
++error(conflict, Data) : state(busy)
+    <- .print("[Robot-Light] ERROR: Colisión detectada, reintentando");
+       .wait(2000);
+       ?current_container(CId);
+       ?target_shelf(ShelfId);
+       !execute_task(CId, 12, 5).
 
-/* Error del entorno */
-+error(ErrorType, Data) : state(busy) <-
-    .print("[Robot-Light] ❌ ERROR: ", ErrorType, " - ", Data);
-    .my_name(Me);
-    ?current_container(CId);
-    .send(scheduler, tell, robot_error(Me, CId, ErrorType));
-    -+state(idle);
-    -current_container(CId);
-    -current_shelf(_).
++error(route_blocked, Data) : state(busy)
+    <- .print("[Robot-Light] ERROR: Ruta bloqueada, buscando alternativa");
+       .wait(1000);
+       ?current_container(CId);
+       ?target_shelf(ShelfId);
+       !execute_task(CId, 12, 5).
 
-/* Error en estado idle (por si acaso) */
-+error(ErrorType, Data) : state(idle) <-
-    .print("[Robot-Light] ❌ ERROR (idle): ", ErrorType, " - ", Data);
-    .my_name(Me);
-    .send(scheduler, tell, robot_error(Me, "none", ErrorType)).
-
-/* ============================================================================
- * INFORMACIÓN DE CONTENEDOR RECIBIDA
- * ============================================================================ */
-
-+container_info(CId, W, H, Weight, Type) : true <-
-    .print("[Robot-Light] 📊 Info ", CId, ": ", Weight, "kg, ", W, "x", H, ", ", Type).
++error(Tipo, Data)
+    <- .print("[Robot-Light] ERROR: ", Tipo);
+       .my_name(Me);
+       .send(scheduler, tell, robot_error(Me, none, Tipo));
+       -+state(idle).
