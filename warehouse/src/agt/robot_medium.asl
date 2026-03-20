@@ -1,9 +1,9 @@
 /* ROBOT MEDIUM - 30kg, 1x2, velocidad media */
-/* Anti-oscilacion: recuerda ultimo desvio para no repetirlo */
 
 state(idle).
 position(2,3).
-last_detour(none). /* none, up, down, left, right */
+base(2,3).
+returning(no).
 
 shelf_cell(10,2). shelf_cell(11,2). shelf_cell(10,3). shelf_cell(11,3).
 shelf_cell(12,2). shelf_cell(13,2). shelf_cell(12,3). shelf_cell(13,3).
@@ -31,17 +31,53 @@ blocked(X,Y) :- Y >= 15.
 !start.
 
 +!start <-
-    .print("[Robot-Medium] Iniciado - 30kg 1x2");
+    .print("[Robot-Medium] Iniciado");
     !main_loop.
 
-+!main_loop : state(idle) <- .wait(2000); !main_loop.
-+!main_loop : state(busy) <- .wait(1500); !main_loop.
+/* Idle y no en base: dar un paso hacia base */
++!main_loop : state(idle) & returning(no) & base(BX, BY) & not position(BX, BY) <-
+    -+returning(yes);
+    !return_step;
+    !main_loop.
+
++!main_loop : state(idle) & returning(yes) & base(BX, BY) & not position(BX, BY) <-
+    !return_step;
+    !main_loop.
+
+/* Idle y en base o volviendo: esperar */
++!main_loop : state(idle) <-
+    -+returning(no);
+    .wait(1000);
+    !main_loop.
+
++!main_loop : state(busy) <- .wait(500); !main_loop.
+
+/* Dar un paso hacia base (no bloqueante, un solo paso) */
++!return_step : base(BX, BY) & position(BX, BY) <- -+returning(no).
+
++!return_step : base(BX, BY) & position(MX, MY) & MY < BY & not blocked(MX, MY+1) <-
+    move_to(MX, MY+1); .wait(300); -+position(MX, MY+1).
+
++!return_step : base(BX, BY) & position(MX, MY) & MY > BY & not blocked(MX, MY-1) <-
+    move_to(MX, MY-1); .wait(300); -+position(MX, MY-1).
+
++!return_step : base(BX, BY) & position(MX, MY) & MX < BX & not blocked(MX+1, MY) <-
+    move_to(MX+1, MY); .wait(300); -+position(MX+1, MY).
+
++!return_step : base(BX, BY) & position(MX, MY) & MX > BX & not blocked(MX-1, MY) <-
+    move_to(MX-1, MY); .wait(300); -+position(MX-1, MY).
+
+/* Paso bloqueado: esperar */
++!return_step <- .wait(300).
+-!return_step <- .wait(300).
+
+/* ========== TAREA ========== */
 
 +task(CId, ShelfId)[source(scheduler)] : state(idle) <-
     -+state(busy);
+    -+returning(no);
     +current_container(CId);
     +target_shelf(ShelfId);
-    -+last_detour(none);
     !execute_task(CId, ShelfId).
 
 +task(CId, ShelfId)[source(scheduler)] : state(busy) <-
@@ -50,173 +86,96 @@ blocked(X,Y) :- Y >= 15.
 
 +!execute_task(CId, ShelfId) <-
     get_container_info(CId);
-    .wait(500);
-    -+last_detour(none);
-    !go_to(1, 0);
-    .print("[Robot-Medium] pickup ", CId);
+    .wait(100);
+    ?position(PX, PY);
+    !nudge_up(PX, PY);
+    !go(1, 0);
     pickup(CId);
-    .wait(500);
-    !get_shelf_target(ShelfId, SX, SY);
-    -+last_detour(none);
-    !go_to(SX, SY);
-    .print("[Robot-Medium] drop ", ShelfId);
+    .wait(100);
+    !get_shelf_dest(ShelfId, SX, SY);
+    !go(SX, SY);
     drop_at(ShelfId);
-    .wait(500);
+    .wait(100);
     .my_name(Me);
     .send(scheduler, tell, task_complete(CId, Me));
-    .print("[Robot-Medium] OK!");
+    .print("[Robot-Medium] ", CId, " -> ", ShelfId, " OK");
     -+state(idle);
     -current_container(CId);
     -target_shelf(ShelfId).
 
-/* ========== NAVEGACION CON MEMORIA DE DESVIO ========== */
++!nudge_up(X, 0) <- true.
++!nudge_up(X, Y) : Y > 0 & not blocked(X, Y-1) <-
+    move_to(X, Y-1); .wait(300); -+position(X, Y-1).
+-!nudge_up(X, Y) <- .wait(400); !nudge_up(X, Y).
 
-+!go_to(TX, TY) : position(TX, TY) <- -+last_detour(none).
+/* ========== NAVEGACION: Y PRIMERO ========== */
 
-/* --- X difiere: intentar avanzar en X --- */
-+!go_to(TX, TY) : position(MX, MY) & MX < TX & not blocked(MX+1, MY) <-
-    !try_move(MX+1, MY, TX, TY).
++!go(TX, TY) : position(TX, TY) <- true.
 
-+!go_to(TX, TY) : position(MX, MY) & MX > TX & not blocked(MX-1, MY) <-
-    !try_move(MX-1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY < TY & not blocked(MX, MY+1) <-
+    !do_step(MX, MY+1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY > TY & not blocked(MX, MY-1) <-
+    !do_step(MX, MY-1, TX, TY).
 
-/* --- X bloqueado por shelf: desviar en Y, preferir ARRIBA si ultimo fue abajo --- */
-+!go_to(TX, TY) : position(MX, MY) & MX \== TX & blocked(MX+1, MY) & last_detour(down) & not blocked(MX, MY-1) <-
-    -+last_detour(up);
-    !try_move(MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX < TX & not blocked(MX+1, MY) <-
+    !do_step(MX+1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX > TX & not blocked(MX-1, MY) <-
+    !do_step(MX-1, MY, TX, TY).
 
-+!go_to(TX, TY) : position(MX, MY) & MX \== TX & blocked(MX-1, MY) & last_detour(down) & not blocked(MX, MY-1) <-
-    -+last_detour(up);
-    !try_move(MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY \== TY & not blocked(MX-1, MY) <-
+    !do_step(MX-1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY \== TY & not blocked(MX+1, MY) <-
+    !do_step(MX+1, MY, TX, TY).
 
-+!go_to(TX, TY) : position(MX, MY) & MX \== TX & blocked(MX+1, MY) & last_detour(up) & not blocked(MX, MY+1) <-
-    -+last_detour(down);
-    !try_move(MX, MY+1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX \== TX & not blocked(MX, MY-1) <-
+    !do_step(MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX \== TX & not blocked(MX, MY+1) <-
+    !do_step(MX, MY+1, TX, TY).
 
-+!go_to(TX, TY) : position(MX, MY) & MX \== TX & blocked(MX-1, MY) & last_detour(up) & not blocked(MX, MY+1) <-
-    -+last_detour(down);
-    !try_move(MX, MY+1, TX, TY).
++!go(TX, TY) : position(MX, MY) & not blocked(MX, MY-1) <-
+    !do_step(MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & not blocked(MX, MY+1) <-
+    !do_step(MX, MY+1, TX, TY).
++!go(TX, TY) : position(MX, MY) & not blocked(MX-1, MY) <-
+    !do_step(MX-1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & not blocked(MX+1, MY) <-
+    !do_step(MX+1, MY, TX, TY).
 
-/* X bloqueado, sin desvio previo: preferir ir hacia destino Y, o arriba por defecto */
-+!go_to(TX, TY) : position(MX, MY) & MX < TX & blocked(MX+1, MY) & MY > TY & not blocked(MX, MY-1) <-
-    -+last_detour(up);
-    !try_move(MX, MY-1, TX, TY).
++!go(TX, TY) <- .wait(1000); !go(TX, TY).
 
-+!go_to(TX, TY) : position(MX, MY) & MX < TX & blocked(MX+1, MY) & not blocked(MX, MY-1) <-
-    -+last_detour(up);
-    !try_move(MX, MY-1, TX, TY).
+/* ========== PASO ========== */
 
-+!go_to(TX, TY) : position(MX, MY) & MX < TX & blocked(MX+1, MY) & not blocked(MX, MY+1) <-
-    -+last_detour(down);
-    !try_move(MX, MY+1, TX, TY).
++!do_step(NX, NY, TX, TY) <-
+    move_to(NX, NY); .wait(300); -+position(NX, NY); !go(TX, TY).
 
-+!go_to(TX, TY) : position(MX, MY) & MX > TX & blocked(MX-1, MY) & MY > TY & not blocked(MX, MY-1) <-
-    -+last_detour(up);
-    !try_move(MX, MY-1, TX, TY).
+-!do_step(NX, NY, TX, TY) <-
+    .wait(500); ?position(MX, MY); !retry_step(NX, NY, TX, TY, MX, MY).
 
-+!go_to(TX, TY) : position(MX, MY) & MX > TX & blocked(MX-1, MY) & not blocked(MX, MY-1) <-
-    -+last_detour(up);
-    !try_move(MX, MY-1, TX, TY).
++!retry_step(NX, NY, TX, TY, MX, MY) <-
+    move_to(NX, NY); .wait(300); -+position(NX, NY); !go(TX, TY).
 
-+!go_to(TX, TY) : position(MX, MY) & MX > TX & blocked(MX-1, MY) & not blocked(MX, MY+1) <-
-    -+last_detour(down);
-    !try_move(MX, MY+1, TX, TY).
-
-/* --- Y difiere, X ya OK --- */
-+!go_to(TX, TY) : position(MX, MY) & MX == TX & MY < TY & not blocked(MX, MY+1) <-
-    !try_move(MX, MY+1, TX, TY).
-
-+!go_to(TX, TY) : position(MX, MY) & MX == TX & MY > TY & not blocked(MX, MY-1) <-
-    !try_move(MX, MY-1, TX, TY).
-
-/* Y bloqueado por shelf: desviar en X con misma logica anti-oscilacion */
-+!go_to(TX, TY) : position(MX, MY) & MX == TX & MY \== TY & last_detour(left) & not blocked(MX+1, MY) <-
-    -+last_detour(right);
-    !try_move(MX+1, MY, TX, TY).
-
-+!go_to(TX, TY) : position(MX, MY) & MX == TX & MY \== TY & last_detour(right) & not blocked(MX-1, MY) <-
-    -+last_detour(left);
-    !try_move(MX-1, MY, TX, TY).
-
-+!go_to(TX, TY) : position(MX, MY) & MX == TX & MY < TY & blocked(MX, MY+1) & not blocked(MX-1, MY) <-
-    -+last_detour(left);
-    !try_move(MX-1, MY, TX, TY).
-
-+!go_to(TX, TY) : position(MX, MY) & MX == TX & MY < TY & blocked(MX, MY+1) & not blocked(MX+1, MY) <-
-    -+last_detour(right);
-    !try_move(MX+1, MY, TX, TY).
-
-+!go_to(TX, TY) : position(MX, MY) & MX == TX & MY > TY & blocked(MX, MY-1) & not blocked(MX-1, MY) <-
-    -+last_detour(left);
-    !try_move(MX-1, MY, TX, TY).
-
-+!go_to(TX, TY) : position(MX, MY) & MX == TX & MY > TY & blocked(MX, MY-1) & not blocked(MX+1, MY) <-
-    -+last_detour(right);
-    !try_move(MX+1, MY, TX, TY).
-
-/* --- Fallback --- */
-+!go_to(TX, TY) : position(MX, MY) & not blocked(MX, MY-1) <-
-    -+last_detour(up);
-    !try_move(MX, MY-1, TX, TY).
-+!go_to(TX, TY) : position(MX, MY) & not blocked(MX, MY+1) <-
-    -+last_detour(down);
-    !try_move(MX, MY+1, TX, TY).
-+!go_to(TX, TY) : position(MX, MY) & not blocked(MX+1, MY) <-
-    -+last_detour(right);
-    !try_move(MX+1, MY, TX, TY).
-+!go_to(TX, TY) : position(MX, MY) & not blocked(MX-1, MY) <-
-    -+last_detour(left);
-    !try_move(MX-1, MY, TX, TY).
-
-+!go_to(TX, TY) <- .wait(1500); -+last_detour(none); !go_to(TX, TY).
-
-/* --- try_move con roomba_turn anti-oscilacion --- */
-+!try_move(NX, NY, TX, TY) <-
-    move_to(NX, NY);
-    .wait(500);
-    -+position(NX, NY);
-    !go_to(TX, TY).
-
-/* Colision con robot: girar 90, recordar desvio */
--!try_move(NX, NY, TX, TY) : position(MX, MY) & NX \== MX & last_detour(down) & not blocked(MX, MY-1) <-
-    .wait(500); -+last_detour(up);
-    move_to(MX, MY-1); .wait(500); -+position(MX, MY-1); !go_to(TX, TY).
-
--!try_move(NX, NY, TX, TY) : position(MX, MY) & NX \== MX & not blocked(MX, MY-1) <-
-    .wait(500); -+last_detour(up);
-    move_to(MX, MY-1); .wait(500); -+position(MX, MY-1); !go_to(TX, TY).
-
--!try_move(NX, NY, TX, TY) : position(MX, MY) & NX \== MX & not blocked(MX, MY+1) <-
-    .wait(500); -+last_detour(down);
-    move_to(MX, MY+1); .wait(500); -+position(MX, MY+1); !go_to(TX, TY).
-
--!try_move(NX, NY, TX, TY) : position(MX, MY) & NY \== MY & last_detour(right) & not blocked(MX-1, MY) <-
-    .wait(500); -+last_detour(left);
-    move_to(MX-1, MY); .wait(500); -+position(MX-1, MY); !go_to(TX, TY).
-
--!try_move(NX, NY, TX, TY) : position(MX, MY) & NY \== MY & not blocked(MX-1, MY) <-
-    .wait(500); -+last_detour(left);
-    move_to(MX-1, MY); .wait(500); -+position(MX-1, MY); !go_to(TX, TY).
-
--!try_move(NX, NY, TX, TY) : position(MX, MY) & NY \== MY & not blocked(MX+1, MY) <-
-    .wait(500); -+last_detour(right);
-    move_to(MX+1, MY); .wait(500); -+position(MX+1, MY); !go_to(TX, TY).
-
-/* Todo fallo: esperar y reset */
--!try_move(NX, NY, TX, TY) <-
-    .wait(1200); -+last_detour(none); !go_to(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) : NX \== MX & MY > 0 & not blocked(MX, MY-1) <-
+    move_to(MX, MY-1); .wait(300); -+position(MX, MY-1); !go(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) : NX \== MX & not blocked(MX, MY+1) <-
+    move_to(MX, MY+1); .wait(300); -+position(MX, MY+1); !go(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) : NY \== MY & not blocked(MX-1, MY) <-
+    move_to(MX-1, MY); .wait(300); -+position(MX-1, MY); !go(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) : NY \== MY & not blocked(MX+1, MY) <-
+    move_to(MX+1, MY); .wait(300); -+position(MX+1, MY); !go(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) <-
+    .wait(1500); !go(TX, TY).
 
 /* ========== DESTINOS ========== */
-+!get_shelf_target("shelf_1", 10, 1).
-+!get_shelf_target("shelf_2", 12, 1).
-+!get_shelf_target("shelf_3", 14, 1).
-+!get_shelf_target("shelf_4", 16, 1).
-+!get_shelf_target("shelf_5", 10, 5).
-+!get_shelf_target("shelf_6", 13, 5).
-+!get_shelf_target("shelf_7", 16, 5).
-+!get_shelf_target("shelf_8", 10, 9).
-+!get_shelf_target("shelf_9", 14, 9).
-+!get_shelf_target(_, 10, 5).
++!get_shelf_dest("shelf_1", 10, 1).
++!get_shelf_dest("shelf_2", 12, 1).
++!get_shelf_dest("shelf_3", 14, 1).
++!get_shelf_dest("shelf_4", 16, 1).
++!get_shelf_dest("shelf_5", 10, 5).
++!get_shelf_dest("shelf_6", 13, 5).
++!get_shelf_dest("shelf_7", 16, 5).
++!get_shelf_dest("shelf_8", 10, 9).
++!get_shelf_dest("shelf_9", 14, 9).
++!get_shelf_dest(_, 10, 5).
 
 +robot_at(X,Y) <- -+position(X,Y).
 
@@ -230,7 +189,7 @@ blocked(X,Y) :- Y >= 15.
     .send(scheduler, tell, robot_error(Me, CId, container_too_big));
     -+state(idle); -current_container(CId); -target_shelf(Sh).
 +error(too_far, _) : state(busy) <-
-    .wait(500); ?current_container(CId); ?target_shelf(Sh);
+    .wait(300); ?current_container(CId); ?target_shelf(Sh);
     !execute_task(CId, Sh).
 +error(conflict, _) <- true.
 +error(route_blocked, _) <- true.
@@ -242,7 +201,7 @@ blocked(X,Y) :- Y >= 15.
     .my_name(Me); .send(scheduler, tell, robot_error(Me, none, Tipo));
     -+state(idle).
 -!execute_task(CId, ShelfId) <-
-    .print("[Robot-Medium] Fallo ", CId);
+    .print("[Robot-Medium] FALLO ", CId);
     .my_name(Me);
     .send(scheduler, tell, robot_error(Me, CId, execution_failed));
     -+state(idle); -current_container(CId); -target_shelf(ShelfId).

@@ -1,4 +1,5 @@
-/* SCHEDULER - Coordinador con prioridad light>medium>heavy */
+/* SCHEDULER - Coordinador con seleccion inteligente de estanteria */
+/* Prioriza estanterias pequenas que puedan almacenar el contenedor */
 
 robot_capacity(robot_light,  10,  1, 1, 3).
 robot_capacity(robot_medium, 30,  1, 2, 2).
@@ -8,34 +9,84 @@ robot_status(robot_light,  idle).
 robot_status(robot_medium, idle).
 robot_status(robot_heavy,  idle).
 
+robot_task(robot_light, none, none).
+robot_task(robot_medium, none, none).
+robot_task(robot_heavy, none, none).
+
+/* Estanterias: shelf_data(Id, MaxWeight, MaxVolume, CurrentWeight, CurrentVolume)
+   Pequenas (fila 1): 50kg, vol 8
+   Medianas (fila 2): 100kg, vol 12
+   Grandes (fila 3): 200kg, vol 20 */
+shelf_data("shelf_1", 50, 8, 0, 0).
+shelf_data("shelf_2", 50, 8, 0, 0).
+shelf_data("shelf_3", 50, 8, 0, 0).
+shelf_data("shelf_4", 50, 8, 0, 0).
+shelf_data("shelf_5", 100, 12, 0, 0).
+shelf_data("shelf_6", 100, 12, 0, 0).
+shelf_data("shelf_7", 100, 12, 0, 0).
+shelf_data("shelf_8", 200, 20, 0, 0).
+shelf_data("shelf_9", 200, 20, 0, 0).
+
+/* Prioridad de estanteria: menor indice = probar primero */
+/* Primero pequenas, luego medianas, luego grandes */
+shelf_order(1, "shelf_1").
+shelf_order(2, "shelf_2").
+shelf_order(3, "shelf_3").
+shelf_order(4, "shelf_4").
+shelf_order(5, "shelf_5").
+shelf_order(6, "shelf_6").
+shelf_order(7, "shelf_7").
+shelf_order(8, "shelf_8").
+shelf_order(9, "shelf_9").
+
+/* Regla: estanteria puede almacenar contenedor */
+shelf_fits(ShelfId, Weight, Area) :-
+    shelf_data(ShelfId, MaxW, MaxV, CurW, CurV) &
+    CurW + Weight <= MaxW &
+    CurV + Area <= MaxV.
+
 stat_received(0).
 stat_assigned(0).
+stat_completed(0).
 stat_errors(0).
 
 !start.
 
-+!start : true <-
-    .print("[Scheduler] Iniciado").
++!start : true <- .print("[Scheduler] Iniciado").
+
+/* ===== DETECCION ===== */
 
 +new_container(CId) : not pending(CId, _, _, _, _) <-
     ?stat_received(N); -stat_received(N); +stat_received(N+1);
-    .print("[Scheduler] Nuevo: ", CId);
     get_container_info(CId).
 
 +new_container(CId) : pending(CId, _, _, _, _) <- true.
 
+/* ===== CLASIFICACION ===== */
+
 +container_info(CId, W, H, Weight, Type) : true <-
     -container_info(CId, W, H, Weight, Type);
-    .print("[Scheduler] ", CId, ": ", Weight, "kg ", W, "x", H, " ", Type);
+    .print("[Scheduler] Recibido ", CId, ": ", Weight, "kg ", W, "x", H, " ", Type);
+    /* Notificar al supervisor */
+    .send(supervisor, tell, container_counted(CId, W, H, Weight, Type));
     +pending(CId, W, H, Weight, Type);
     !try_assign_pending.
 
+/* ===== ROBOT LIBRE ===== */
+
 +task_complete(CId, Robot)[source(_)] : true <-
-    .print("[Scheduler] Libre: ", Robot);
+    ?stat_completed(NC); -stat_completed(NC); +stat_completed(NC+1);
+    .print("[Scheduler] Completado: ", Robot, " entrego ", CId);
+    /* Notificar supervisor */
+    .send(supervisor, tell, task_done(CId, Robot));
     -robot_status(Robot, busy);
     +robot_status(Robot, idle);
+    -robot_task(Robot, _, _);
+    +robot_task(Robot, none, none);
     -task_complete(CId, Robot)[source(_)];
     !try_assign_pending.
+
+/* ===== CICLO ===== */
 
 +!try_assign_pending : pending(CId, W, H, Weight, Type) <-
     !try_assign(CId, W, H, Weight, Type);
@@ -43,6 +94,7 @@ stat_errors(0).
 
 +!try_assign_pending : not pending(_, _, _, _, _) <- true.
 
+/* Prioridad: light > medium > heavy */
 +!try_assign(CId, W, H, Weight, Type)
     : robot_capacity(robot_light, MW, MWd, MHt, _)
     & Weight <= MW & W <= MWd & H <= MHt
@@ -61,43 +113,100 @@ stat_errors(0).
     & robot_status(robot_heavy, idle)
     <- !do_assign(CId, W, H, Weight, Type, robot_heavy).
 
-+!try_assign(CId, W, H, Weight, Type) : true <-
-    .print("[Scheduler] Cola: ", CId, " (", Weight, "kg)").
++!try_assign(CId, W, H, Weight, Type) : true <- true.
+
+/* ===== SELECCION DE ESTANTERIA + ASIGNACION ===== */
 
 +!do_assign(CId, W, H, Weight, Type, Robot) : true <-
-    get_free_shelf(CId);
-    ?free_shelf(CId, ShelfId);
-    -free_shelf(CId, ShelfId);
+    !find_best_shelf(CId, W, H, Weight, ShelfId);
     -pending(CId, W, H, Weight, Type);
     -robot_status(Robot, idle);
     +robot_status(Robot, busy);
+    -robot_task(Robot, _, _);
+    +robot_task(Robot, CId, ShelfId);
+    /* Actualizar ocupacion de estanteria */
+    ?shelf_data(ShelfId, MaxW, MaxV, CurW, CurV);
+    -shelf_data(ShelfId, MaxW, MaxV, CurW, CurV);
+    +shelf_data(ShelfId, MaxW, MaxV, CurW + Weight, CurV + W*H);
     .send(Robot, tell, task(CId, ShelfId));
-    .print("[Scheduler] ", Robot, " -> ", CId, " -> ", ShelfId);
+    .print("[Scheduler] ", Robot, " <- ", CId, " (", Weight, "kg ", Type, ") -> ", ShelfId);
     ?stat_assigned(N); -stat_assigned(N); +stat_assigned(N+1).
 
 -!do_assign(CId, W, H, Weight, Type, Robot) : true <-
     .print("[Scheduler] Sin estanteria para ", CId).
 
+/* Buscar la estanteria mas pequena que quepa el contenedor */
+/* Probar en orden: shelf_1..4 (pequenas), shelf_5..7 (medianas), shelf_8..9 (grandes) */
+
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_1", Weight, W*H)
+    <- ShelfId = "shelf_1".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_2", Weight, W*H)
+    <- ShelfId = "shelf_2".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_3", Weight, W*H)
+    <- ShelfId = "shelf_3".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_4", Weight, W*H)
+    <- ShelfId = "shelf_4".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_5", Weight, W*H)
+    <- ShelfId = "shelf_5".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_6", Weight, W*H)
+    <- ShelfId = "shelf_6".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_7", Weight, W*H)
+    <- ShelfId = "shelf_7".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_8", Weight, W*H)
+    <- ShelfId = "shelf_8".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_9", Weight, W*H)
+    <- ShelfId = "shelf_9".
+
+/* Ninguna cabe: usar get_free_shelf del entorno como fallback */
++!find_best_shelf(CId, W, H, Weight, ShelfId) <-
+    get_free_shelf(CId);
+    ?free_shelf(CId, ShelfId);
+    -free_shelf(CId, ShelfId).
+
+/* ===== ERRORES ===== */
+
 +robot_error(Robot, CId, ErrorType)[source(_)]
     : pending(CId, W, H, Weight, Type) <-
+    .print("[Scheduler] Error ", ErrorType, " de ", Robot, " con ", CId);
     ?stat_errors(N); -stat_errors(N); +stat_errors(N+1);
+    .send(supervisor, tell, error_occurred(Robot, CId, ErrorType));
     -robot_status(Robot, busy); +robot_status(Robot, idle);
+    -robot_task(Robot, _, _); +robot_task(Robot, none, none);
     -robot_error(Robot, CId, ErrorType)[source(_)];
     !try_assign(CId, W, H, Weight, Type).
 
 +robot_error(Robot, CId, ErrorType)[source(_)]
     : not pending(CId, _, _, _, _) <-
+    .print("[Scheduler] Error ", ErrorType, " de ", Robot);
     ?stat_errors(N); -stat_errors(N); +stat_errors(N+1);
+    .send(supervisor, tell, error_occurred(Robot, CId, ErrorType));
     -robot_status(Robot, busy); +robot_status(Robot, idle);
+    -robot_task(Robot, _, _); +robot_task(Robot, none, none);
     -robot_error(Robot, CId, ErrorType)[source(_)];
     !try_assign_pending.
 
-+!print_status : true <-
-    ?stat_received(R); ?stat_assigned(A); ?stat_errors(E);
+/* ===== ESTADO ===== */
+
++!estado : true <-
+    ?stat_received(R); ?stat_assigned(A); ?stat_completed(C); ?stat_errors(E);
     ?robot_status(robot_light, SL);
     ?robot_status(robot_medium, SM);
     ?robot_status(robot_heavy, SH);
-    .print("[Scheduler] R:", R, " A:", A, " E:", E,
-           " L=", SL, " M=", SM, " H=", SH).
+    ?robot_task(robot_light, TL, DL);
+    ?robot_task(robot_medium, TM, DM);
+    ?robot_task(robot_heavy, TH, DH);
+    .print("[Scheduler] Recibidos:", R, " Asignados:", A, " Completados:", C, " Errores:", E);
+    .print("[Scheduler] Light=", SL, " [", TL, "->", DL, "]");
+    .print("[Scheduler] Medium=", SM, " [", TM, "->", DM, "]");
+    .print("[Scheduler] Heavy=", SH, " [", TH, "->", DH, "]").
 
-+!estado : true <- !print_status.
++!print_status : true <- !estado.

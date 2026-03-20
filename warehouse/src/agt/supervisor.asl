@@ -1,15 +1,16 @@
-/* SUPERVISOR */
+/* SUPERVISOR - Monitor activo del sistema */
+/* Recibe datos del scheduler via mensajes tell */
 
-errores(0).
-urgentes_procesados(0).
-fragiles_procesados(0).
-standard_procesados(0).
+total_errores(0).
 total_completados(0).
+standard_count(0).
+fragile_count(0).
+urgent_count(0).
 
 !start.
 
 +!start <-
-    .print("[Supervisor] Iniciado");
+    .print("[Supervisor] Iniciado - reportes cada 30s");
     !monitor_loop.
 
 +!monitor_loop <-
@@ -18,35 +19,46 @@ total_completados(0).
     !monitor_loop.
 
 +!generar_reporte <-
-    ?errores(E);
-    ?urgentes_procesados(U);
-    ?fragiles_procesados(F);
-    ?standard_procesados(S);
+    ?total_errores(E);
     ?total_completados(TC);
-    .print("=== REPORTE ===");
-    .print("Standard:", S, " Fragile:", F, " Urgent:", U);
-    .print("Completados:", TC, " Errores:", E);
-    .print("===============");
-    .send(scheduler, achieve, estado).
+    ?standard_count(S);
+    ?fragile_count(F);
+    ?urgent_count(U);
+    .print("");
+    .print("=========== REPORTE SUPERVISOR ===========");
+    .print("  Contenedores recibidos por tipo:");
+    .print("    Standard: ", S);
+    .print("    Fragile:  ", F);
+    .print("    Urgent:   ", U);
+    .print("    Total:    ", S+F+U);
+    .print("  Tareas completadas: ", TC);
+    .print("  Errores totales:    ", E);
+    .print("  --- Estado de robots ---");
+    .send(scheduler, achieve, estado);
+    .print("==========================================");
+    .print("").
 
-+robot_error(Robot, CId, Tipo)[source(_)] <-
-    ?errores(N); -errores(N); +errores(N+1).
+/* ===== MENSAJES DEL SCHEDULER ===== */
 
-+container_info(CId, W, H, Peso, "standard") <-
-    ?standard_procesados(N); -standard_procesados(N); +standard_procesados(N+1).
+/* Contenedor recibido: clasificar por tipo */
++container_counted(CId, W, H, Weight, "standard")[source(_)] <-
+    ?standard_count(N); -standard_count(N); +standard_count(N+1).
 
-+container_info(CId, W, H, Peso, "fragile") <-
-    ?fragiles_procesados(N); -fragiles_procesados(N); +fragiles_procesados(N+1).
++container_counted(CId, W, H, Weight, "fragile")[source(_)] <-
+    ?fragile_count(N); -fragile_count(N); +fragile_count(N+1).
 
-+container_info(CId, W, H, Peso, "urgent") <-
-    ?urgentes_procesados(N); -urgentes_procesados(N); +urgentes_procesados(N+1).
++container_counted(CId, W, H, Weight, "urgent")[source(_)] <-
+    ?urgent_count(N); -urgent_count(N); +urgent_count(N+1).
 
-+task_complete(CId, Robot)[source(_)] <-
+/* Tarea completada */
++task_done(CId, Robot)[source(_)] <-
     ?total_completados(N); -total_completados(N); +total_completados(N+1).
 
-+!reporte <-
-    ?errores(E); ?urgentes_procesados(U);
-    ?fragiles_procesados(F); ?standard_procesados(S);
-    ?total_completados(TC);
-    .print("S:", S, " F:", F, " U:", U, " T:", TC, " E:", E);
-    .send(scheduler, achieve, estado).
+/* Error ocurrido */
++error_occurred(Robot, CId, Tipo)[source(_)] <-
+    ?total_errores(N); -total_errores(N); +total_errores(N+1);
+    .print("[Supervisor] ERROR: ", Robot, " - ", Tipo, " - ", CId).
+
+/* ===== REPORTE MANUAL ===== */
+
++!reporte <- !generar_reporte.
