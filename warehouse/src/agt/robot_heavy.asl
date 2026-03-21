@@ -1,159 +1,207 @@
-/*******************************************************************************
- * ROBOT PESADO - Sistema de Gestión Logística de Almacén
- * 
- * Universidad de Vigo - Sistemas Inteligentes
- * Curso 2025-2026
- * 
- * CAPACIDADES:
- *   - Peso máximo: 100 kg
- *   - Tamaño máximo: 2×3
- *   - Velocidad: Baja (1)
- * 
- ******************************************************************************/
+/* ROBOT HEAVY - 100kg, 2x3, velocidad baja */
 
-/* Estado inicial del robot */
-state(idle).         // Estados posibles: idle, moving, picking, carrying, dropping
-position(3,3).       // Posición inicial
-carrying(none).      // Contenedor que está cargando
+state(idle).
+position(3,3).
+base(3,3).
+returning(no).
 
-/* CARACTERÍSTICAS ESPECIALES:
- * - Único robot capaz de manejar contenedores > 30kg
- * - Puede transportar contenedores hasta 2×3
- * - Velocidad baja: debe optimizar rutas y minimizar movimientos
- * - Es un recurso escaso: debe usarse eficientemente
- */
+shelf_cell(10,2). shelf_cell(11,2). shelf_cell(10,3). shelf_cell(11,3).
+shelf_cell(12,2). shelf_cell(13,2). shelf_cell(12,3). shelf_cell(13,3).
+shelf_cell(14,2). shelf_cell(15,2). shelf_cell(14,3). shelf_cell(15,3).
+shelf_cell(16,2). shelf_cell(17,2). shelf_cell(16,3). shelf_cell(17,3).
+shelf_cell(10,6). shelf_cell(11,6). shelf_cell(12,6).
+shelf_cell(10,7). shelf_cell(11,7). shelf_cell(12,7).
+shelf_cell(13,6). shelf_cell(14,6). shelf_cell(15,6).
+shelf_cell(13,7). shelf_cell(14,7). shelf_cell(15,7).
+shelf_cell(16,6). shelf_cell(17,6). shelf_cell(18,6).
+shelf_cell(16,7). shelf_cell(17,7). shelf_cell(18,7).
+shelf_cell(10,10). shelf_cell(11,10). shelf_cell(12,10). shelf_cell(13,10).
+shelf_cell(10,11). shelf_cell(11,11). shelf_cell(12,11). shelf_cell(13,11).
+shelf_cell(10,12). shelf_cell(11,12). shelf_cell(12,12). shelf_cell(13,12).
+shelf_cell(14,10). shelf_cell(15,10). shelf_cell(16,10). shelf_cell(17,10).
+shelf_cell(14,11). shelf_cell(15,11). shelf_cell(16,11). shelf_cell(17,11).
+shelf_cell(14,12). shelf_cell(15,12). shelf_cell(16,12). shelf_cell(17,12).
 
-/* ============================================================================
- * PLANES PRINCIPALES
- * ============================================================================ */
+blocked(X,Y) :- shelf_cell(X,Y).
+blocked(X,Y) :- X < 0.
+blocked(X,Y) :- X >= 20.
+blocked(X,Y) :- Y < 0.
+blocked(X,Y) :- Y >= 15.
 
 !start.
 
-// Plan inicial: Arrancar el robot y hacer pruebas de movimiento
-+!start : true <-
-    .print("🤖 Robot pesado iniciado - Capacidad: 100kg, 2x3 [ESPECIALIZADO]");
-    .print("🔍 Iniciando secuencia de prueba de movimientos (más lento)...");
-    -+state(testing);
-    !test_movement;
-    !work_cycle.
++!start <-
+    .print("[Robot-Heavy] Iniciado");
+    !main_loop.
 
-// Secuencia de prueba de movimientos (más lento, zonas de estanterías grandes)
-+!test_movement : true <-
-    .print("📍 Posición inicial: (3,3)");
-    .wait(2000);
-    
-    .print("➡️  Movimiento 1: Aproximación cuidadosa al área de entrada (2,2)");
-    move_to(2, 2);
-    .wait(3000);
-    
-    .print("➡️  Movimiento 2: Navegar a zona central (8,6)");
-    move_to(8, 6);
-    .wait(3000);
-    
-    .print("➡️  Movimiento 3: Ir a zona de estanterías GRANDES (12,11)");
-    move_to(12, 11);
-    .wait(3000);
-    
-    .print("➡️  Movimiento 4: Explorar más estanterías grandes (14,10)");
-    move_to(14, 10);
-    .wait(3000);
-    
-    .print("➡️  Movimiento 5: Retornar a zona segura (6,6)");
-    move_to(6, 6);
-    .wait(3000);
-    
-    .print("✅ [HEAVY] Prueba de movimientos completada. Robot pesado funcionando.");
-    -+state(idle).
+/* Idle y no en base: dar un paso hacia base */
++!main_loop : state(idle) & returning(no) & base(BX, BY) & not position(BX, BY) <-
+    -+returning(yes);
+    !return_step;
+    !main_loop.
 
-// Ciclo de trabajo principal - más selectivo, solo grandes cargas
-+!work_cycle : state(idle) <-
-    .print("[HEAVY] Solicitando tarea especializada...");
-    request_task;
-    .wait(4000);  // Esperar más tiempo (robot más lento)
-    !work_cycle.
++!main_loop : state(idle) & returning(yes) & base(BX, BY) & not position(BX, BY) <-
+    !return_step;
+    !main_loop.
 
-+!work_cycle : not state(idle) <-
-    .wait(3000);
-    !work_cycle.
+/* Idle y en base o volviendo: esperar */
++!main_loop : state(idle) <-
+    -+returning(no);
+    .wait(1000);
+    !main_loop.
 
-/* ============================================================================
- * MANEJO DE TAREAS ASIGNADAS
- * ============================================================================ */
++!main_loop : state(busy) <- .wait(500); !main_loop.
 
-// Recibir tarea del scheduler
-+task(CId, ShelfId) : state(idle) <-
-    .print("✅ [HEAVY] Tarea especializada asignada: ", CId, " a ", ShelfId);
-    -+state(working);
-    -+carrying(CId);
+/* Dar un paso hacia base (no bloqueante, un solo paso) */
++!return_step : base(BX, BY) & position(BX, BY) <- -+returning(no).
+
++!return_step : base(BX, BY) & position(MX, MY) & MY < BY & not blocked(MX, MY+1) <-
+    move_to(MX, MY+1); .wait(500); -+position(MX, MY+1).
+
++!return_step : base(BX, BY) & position(MX, MY) & MY > BY & not blocked(MX, MY-1) <-
+    move_to(MX, MY-1); .wait(500); -+position(MX, MY-1).
+
++!return_step : base(BX, BY) & position(MX, MY) & MX < BX & not blocked(MX+1, MY) <-
+    move_to(MX+1, MY); .wait(500); -+position(MX+1, MY).
+
++!return_step : base(BX, BY) & position(MX, MY) & MX > BX & not blocked(MX-1, MY) <-
+    move_to(MX-1, MY); .wait(500); -+position(MX-1, MY).
+
+/* Paso bloqueado: esperar */
++!return_step <- .wait(300).
+-!return_step <- .wait(300).
+
+/* ========== TAREA ========== */
+
++task(CId, ShelfId)[source(scheduler)] : state(idle) <-
+    -+state(busy);
+    -+returning(no);
+    +current_container(CId);
+    +target_shelf(ShelfId);
     !execute_task(CId, ShelfId).
 
-+task(CId, ShelfId) : not state(idle) <-
-    .print("⚠️ [HEAVY] Ocupado con carga pesada, rechazando: ", CId).
++task(CId, ShelfId)[source(scheduler)] : state(busy) <-
+    .my_name(Me);
+    .send(scheduler, tell, robot_error(Me, CId, robot_busy)).
 
-// Ejecutar la tarea completa - movimientos más lentos pero precisos
-+!execute_task(CId, ShelfId) : true <-
-    .print("🚀 [HEAVY] Iniciando transporte de carga pesada: ", CId);
-    
-    // Fase 1: Aproximación cuidadosa al área de entrada
-    .print("📍 [HEAVY] Fase 1: Aproximación al área de entrada");
-    move_to(1, 1);
-    .wait(1000);  // Robot pesado es más lento
-    
-    // Fase 2: Recoger el contenedor pesado
-    .print("📦 [HEAVY] Fase 2: Recogiendo contenedor pesado ", CId);
-    -+state(picking);
++!execute_task(CId, ShelfId) <-
+    get_container_info(CId);
+    .wait(100);
+    ?position(PX, PY);
+    !nudge_up(PX, PY);
+    !go(1, 0);
     pickup(CId);
-    .wait(1000);
-    
-    // Fase 3: Transporte lento pero seguro
-    .print("🚚 [HEAVY] Fase 3: Transportando carga pesada a ", ShelfId);
-    -+state(carrying);
-    !navigate_to_shelf(ShelfId);
-    
-    // Fase 4: Depositar con cuidado
-    .print("📥 [HEAVY] Fase 4: Depositando carga en ", ShelfId);
-    -+state(dropping);
+    .wait(100);
+    !get_shelf_dest(ShelfId, SX, SY);
+    !go(SX, SY);
     drop_at(ShelfId);
-    .wait(1000);
-    
-    // Fase 5: Completar y volver a idle
-    .print("✨ [HEAVY] Tarea especializada completada: ", CId);
+    .wait(100);
+    .my_name(Me);
+    .send(scheduler, tell, task_complete(CId, Me));
+    .print("[Robot-Heavy] ", CId, " -> ", ShelfId, " OK");
     -+state(idle);
-    -+carrying(none);
-    -task(CId, ShelfId).
+    -current_container(CId);
+    -target_shelf(ShelfId).
 
-// Navegar a la estantería (zona de estanterías grandes)
-+!navigate_to_shelf(ShelfId) : true <-
-    // Estanterías grandes están en y=10-12
-    move_to(12, 10);
-    .wait(1000);  // Movimiento más lento por el peso
-    move_to(14, 11);
-    .wait(1000).
++!nudge_up(X, 0) <- true.
++!nudge_up(X, Y) : Y > 0 & not blocked(X, Y-1) <-
+    move_to(X, Y-1); .wait(500); -+position(X, Y-1).
+-!nudge_up(X, Y) <- .wait(400); !nudge_up(X, Y).
 
-/* ============================================================================
- * MANEJO DE ERRORES
- * ============================================================================ */
+/* ========== NAVEGACION: Y PRIMERO ========== */
 
-+error(container_too_heavy, Data) : carrying(CId) <-
-    .print("❌ [HEAVY] ERROR CRÍTICO: Contenedor excede capacidad máxima - ", Data);
-    .print("⚠️ Este es el robot más fuerte, contenedor imposible de transportar");
-    -+state(idle);
-    -+carrying(none);
-    -task(CId, _).
++!go(TX, TY) : position(TX, TY) <- true.
 
-+error(container_too_big, Data) : carrying(CId) <-
-    .print("❌ [HEAVY] ERROR: Contenedor muy grande - ", Data);
-    -+state(idle);
-    -+carrying(none);
-    -task(CId, _).
++!go(TX, TY) : position(MX, MY) & MY < TY & not blocked(MX, MY+1) <-
+    !do_step(MX, MY+1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY > TY & not blocked(MX, MY-1) <-
+    !do_step(MX, MY-1, TX, TY).
 
-+error(ErrorType, Data) : true <-
-    .print("⚠️ [HEAVY] Error detectado: ", ErrorType, " - ", Data);
-    -+state(idle);
-    -+carrying(none).
++!go(TX, TY) : position(MX, MY) & MX < TX & not blocked(MX+1, MY) <-
+    !do_step(MX+1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX > TX & not blocked(MX-1, MY) <-
+    !do_step(MX-1, MY, TX, TY).
 
-+picked(CId) : true <-
-    .print("✓ [HEAVY] Carga pesada ", CId, " asegurada correctamente").
++!go(TX, TY) : position(MX, MY) & MY \== TY & not blocked(MX-1, MY) <-
+    !do_step(MX-1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY \== TY & not blocked(MX+1, MY) <-
+    !do_step(MX+1, MY, TX, TY).
 
-+stored(CId, ShelfId) : true <-
-    .print("✓ [HEAVY] Carga pesada ", CId, " almacenada en ", ShelfId).
++!go(TX, TY) : position(MX, MY) & MX \== TX & not blocked(MX, MY-1) <-
+    !do_step(MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX \== TX & not blocked(MX, MY+1) <-
+    !do_step(MX, MY+1, TX, TY).
+
++!go(TX, TY) : position(MX, MY) & not blocked(MX, MY-1) <-
+    !do_step(MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & not blocked(MX, MY+1) <-
+    !do_step(MX, MY+1, TX, TY).
++!go(TX, TY) : position(MX, MY) & not blocked(MX-1, MY) <-
+    !do_step(MX-1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & not blocked(MX+1, MY) <-
+    !do_step(MX+1, MY, TX, TY).
+
++!go(TX, TY) <- .wait(1000); !go(TX, TY).
+
+/* ========== PASO ========== */
+
++!do_step(NX, NY, TX, TY) <-
+    move_to(NX, NY); .wait(500); -+position(NX, NY); !go(TX, TY).
+
+-!do_step(NX, NY, TX, TY) <-
+    .wait(500); ?position(MX, MY); !retry_step(NX, NY, TX, TY, MX, MY).
+
++!retry_step(NX, NY, TX, TY, MX, MY) <-
+    move_to(NX, NY); .wait(500); -+position(NX, NY); !go(TX, TY).
+
+-!retry_step(NX, NY, TX, TY, MX, MY) : NX \== MX & MY > 0 & not blocked(MX, MY-1) <-
+    move_to(MX, MY-1); .wait(500); -+position(MX, MY-1); !go(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) : NX \== MX & not blocked(MX, MY+1) <-
+    move_to(MX, MY+1); .wait(500); -+position(MX, MY+1); !go(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) : NY \== MY & not blocked(MX-1, MY) <-
+    move_to(MX-1, MY); .wait(500); -+position(MX-1, MY); !go(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) : NY \== MY & not blocked(MX+1, MY) <-
+    move_to(MX+1, MY); .wait(500); -+position(MX+1, MY); !go(TX, TY).
+-!retry_step(NX, NY, TX, TY, MX, MY) <-
+    .wait(1500); !go(TX, TY).
+
+/* ========== DESTINOS ========== */
++!get_shelf_dest("shelf_1", 10, 1).
++!get_shelf_dest("shelf_2", 12, 1).
++!get_shelf_dest("shelf_3", 14, 1).
++!get_shelf_dest("shelf_4", 16, 1).
++!get_shelf_dest("shelf_5", 10, 5).
++!get_shelf_dest("shelf_6", 13, 5).
++!get_shelf_dest("shelf_7", 16, 5).
++!get_shelf_dest("shelf_8", 10, 9).
++!get_shelf_dest("shelf_9", 14, 9).
++!get_shelf_dest(_, 10, 9).
+
++robot_at(X,Y) <- -+position(X,Y).
+
+/* ========== ERRORES ========== */
++error(container_too_heavy, _) : state(busy) <-
+    .my_name(Me); ?current_container(CId); ?target_shelf(Sh);
+    .send(scheduler, tell, robot_error(Me, CId, container_too_heavy));
+    -+state(idle); -current_container(CId); -target_shelf(Sh).
++error(container_too_big, _) : state(busy) <-
+    .my_name(Me); ?current_container(CId); ?target_shelf(Sh);
+    .send(scheduler, tell, robot_error(Me, CId, container_too_big));
+    -+state(idle); -current_container(CId); -target_shelf(Sh).
++error(too_far, _) : state(busy) <-
+    .wait(300); ?current_container(CId); ?target_shelf(Sh);
+    !execute_task(CId, Sh).
++error(conflict, _) <- true.
++error(route_blocked, _) <- true.
++error(shelf_full, _) : state(busy) <-
+    .my_name(Me); ?current_container(CId); ?target_shelf(Sh);
+    .send(scheduler, tell, robot_error(Me, CId, shelf_full));
+    -+state(idle); -current_container(CId); -target_shelf(Sh).
++error(Tipo, _) <-
+    .my_name(Me); .send(scheduler, tell, robot_error(Me, none, Tipo));
+    -+state(idle).
+-!execute_task(CId, ShelfId) <-
+    .print("[Robot-Heavy] FALLO ", CId);
+    .my_name(Me);
+    .send(scheduler, tell, robot_error(Me, CId, execution_failed));
+    -+state(idle); -current_container(CId); -target_shelf(ShelfId).
