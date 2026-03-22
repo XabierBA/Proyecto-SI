@@ -1,10 +1,23 @@
-/* ROBOT HEAVY - 100kg, 2x3, velocidad baja */
+/*******************************************************************************
+ * ROBOT HEAVY - Sistema de Gestión Logística de Almacén
+ * 
+ * Universidad de Vigo - Sistemas Inteligentes
+ * Curso 2025-2026
+ * 
+ * CAPACIDADES:
+ *   - Peso máximo: 100 kg
+ *   - Tamaño máximo: 2×3
+ *   - Velocidad: Baja (1)
+ * 
+ ******************************************************************************/
 
+/* Estado inicial del Robot */
 state(idle).
 position(3,3).
 base(3,3).
 returning(no).
 
+/* Declaracion de celdas de las estanterias */
 shelf_cell(10,2). shelf_cell(11,2). shelf_cell(10,3). shelf_cell(11,3).
 shelf_cell(12,2). shelf_cell(13,2). shelf_cell(12,3). shelf_cell(13,3).
 shelf_cell(14,2). shelf_cell(15,2). shelf_cell(14,3). shelf_cell(15,3).
@@ -22,14 +35,21 @@ shelf_cell(14,10). shelf_cell(15,10). shelf_cell(16,10). shelf_cell(17,10).
 shelf_cell(14,11). shelf_cell(15,11). shelf_cell(16,11). shelf_cell(17,11).
 shelf_cell(14,12). shelf_cell(15,12). shelf_cell(16,12). shelf_cell(17,12).
 
+/* Declaracion del bloqueo por estanterias y bordes */
 blocked(X,Y) :- shelf_cell(X,Y).
 blocked(X,Y) :- X < 0.
 blocked(X,Y) :- X >= 20.
 blocked(X,Y) :- Y < 0.
 blocked(X,Y) :- Y >= 15.
 
+
+/* ============================================================================
+ * PLANES PRINCIPALES
+ * ============================================================================ */
+
 !start.
 
+/* Iniciamos el robot */
 +!start <-
     .print("[Robot-Heavy] Iniciado");
     !main_loop.
@@ -52,18 +72,26 @@ blocked(X,Y) :- Y >= 15.
 
 +!main_loop : state(busy) <- .wait(500); !main_loop.
 
-/* Dar un paso hacia base (no bloqueante, un solo paso) */
+/* ============================================================================
+ * PLAN MOVIMIENTO ROBOT HACIA BASE
+ * ============================================================================ */
+
+/* Si ya está en base, detiene el retorno */
 +!return_step : base(BX, BY) & position(BX, BY) <- -+returning(no).
 
+/* Si la base está arriba y la celda superior no está bloqueada */
 +!return_step : base(BX, BY) & position(MX, MY) & MY < BY & not blocked(MX, MY+1) <-
     move_to(MX, MY+1); .wait(500); -+position(MX, MY+1).
 
+/* Si la base está abajo y la celda inferior no está bloqueada */
 +!return_step : base(BX, BY) & position(MX, MY) & MY > BY & not blocked(MX, MY-1) <-
     move_to(MX, MY-1); .wait(500); -+position(MX, MY-1).
 
+/* Si la base está a la derecha y la celda derecha no está bloqueada */
 +!return_step : base(BX, BY) & position(MX, MY) & MX < BX & not blocked(MX+1, MY) <-
     move_to(MX+1, MY); .wait(500); -+position(MX+1, MY).
 
+/* Si la base está a la izquierda y la celda izquierda no está bloqueada */
 +!return_step : base(BX, BY) & position(MX, MY) & MX > BX & not blocked(MX-1, MY) <-
     move_to(MX-1, MY); .wait(500); -+position(MX-1, MY).
 
@@ -71,7 +99,10 @@ blocked(X,Y) :- Y >= 15.
 +!return_step <- .wait(300).
 -!return_step <- .wait(300).
 
-/* ========== TAREA ========== */
+
+/* ============================================================================
+ * MANEJO DE TAREAS ASIGNADAS
+ * ============================================================================ */
 
 +task(CId, ShelfId)[source(scheduler)] : state(idle) <-
     -+state(busy);
@@ -108,42 +139,67 @@ blocked(X,Y) :- Y >= 15.
     move_to(X, Y-1); .wait(500); -+position(X, Y-1).
 -!nudge_up(X, Y) <- .wait(400); !nudge_up(X, Y).
 
-/* ========== NAVEGACION: Y PRIMERO ========== */
+/* ============================================================================
+ * NAVEGACIÓN
+ * ============================================================================ */
 
+/* Si ya está en el destino, termina */
 +!go(TX, TY) : position(TX, TY) <- true.
 
+/* Si Y destino > Y actual y la celda superior no está bloqueada */
 +!go(TX, TY) : position(MX, MY) & MY < TY & not blocked(MX, MY+1) <-
     !do_step(MX, MY+1, TX, TY).
+
+/* Si Y destino < Y actual y la celda inferior no está bloqueada */
 +!go(TX, TY) : position(MX, MY) & MY > TY & not blocked(MX, MY-1) <-
     !do_step(MX, MY-1, TX, TY).
 
+/* Si X destino > X actual y la celda derecha no está bloqueada */
 +!go(TX, TY) : position(MX, MY) & MX < TX & not blocked(MX+1, MY) <-
     !do_step(MX+1, MY, TX, TY).
+
+/* Si X destino < X actual y la celda izquierda no está bloqueada */
 +!go(TX, TY) : position(MX, MY) & MX > TX & not blocked(MX-1, MY) <-
     !do_step(MX-1, MY, TX, TY).
 
+/* Movimiento alternativo: si Y no es destino, intentar izquierda */
 +!go(TX, TY) : position(MX, MY) & MY \== TY & not blocked(MX-1, MY) <-
     !do_step(MX-1, MY, TX, TY).
+
+/* Movimiento alternativo: si Y no es destino, intentar derecha */
 +!go(TX, TY) : position(MX, MY) & MY \== TY & not blocked(MX+1, MY) <-
     !do_step(MX+1, MY, TX, TY).
 
+/* Movimiento alternativo: si X no es destino, intentar abajo */
 +!go(TX, TY) : position(MX, MY) & MX \== TX & not blocked(MX, MY-1) <-
     !do_step(MX, MY-1, TX, TY).
+
+/* Movimiento alternativo: si X no es destino, intentar arriba */
 +!go(TX, TY) : position(MX, MY) & MX \== TX & not blocked(MX, MY+1) <-
     !do_step(MX, MY+1, TX, TY).
 
+/* Movimiento por defecto: intentar abajo */
 +!go(TX, TY) : position(MX, MY) & not blocked(MX, MY-1) <-
     !do_step(MX, MY-1, TX, TY).
+
+/* Movimiento por defecto: intentar arriba */
 +!go(TX, TY) : position(MX, MY) & not blocked(MX, MY+1) <-
     !do_step(MX, MY+1, TX, TY).
+
+/* Movimiento por defecto: intentar izquierda */
 +!go(TX, TY) : position(MX, MY) & not blocked(MX-1, MY) <-
     !do_step(MX-1, MY, TX, TY).
+
+/* Movimiento por defecto: intentar derecha */
 +!go(TX, TY) : position(MX, MY) & not blocked(MX+1, MY) <-
     !do_step(MX+1, MY, TX, TY).
 
+/* Si no hay movimiento posible, esperar y reintentar */
 +!go(TX, TY) <- .wait(1000); !go(TX, TY).
 
-/* ========== PASO ========== */
+/* ============================================================================
+ * PASOS
+ * ============================================================================ */
 
 +!do_step(NX, NY, TX, TY) <-
     move_to(NX, NY); .wait(500); -+position(NX, NY); !go(TX, TY).
@@ -165,7 +221,11 @@ blocked(X,Y) :- Y >= 15.
 -!retry_step(NX, NY, TX, TY, MX, MY) <-
     .wait(1500); !go(TX, TY).
 
-/* ========== DESTINOS ========== */
+
+/* ============================================================================
+ * DESTINOS OBJETIVO ESTANTERIAS
+ * ============================================================================ */
+
 +!get_shelf_dest("shelf_1", 10, 1).
 +!get_shelf_dest("shelf_2", 12, 1).
 +!get_shelf_dest("shelf_3", 14, 1).
@@ -179,27 +239,38 @@ blocked(X,Y) :- Y >= 15.
 
 +robot_at(X,Y) <- -+position(X,Y).
 
-/* ========== ERRORES ========== */
+
+/* ============================================================================
+ * MANEJO DE ERRORES
+ * ============================================================================ */
+
 +error(container_too_heavy, _) : state(busy) <-
     .my_name(Me); ?current_container(CId); ?target_shelf(Sh);
     .send(scheduler, tell, robot_error(Me, CId, container_too_heavy));
     -+state(idle); -current_container(CId); -target_shelf(Sh).
+
 +error(container_too_big, _) : state(busy) <-
     .my_name(Me); ?current_container(CId); ?target_shelf(Sh);
     .send(scheduler, tell, robot_error(Me, CId, container_too_big));
     -+state(idle); -current_container(CId); -target_shelf(Sh).
+
 +error(too_far, _) : state(busy) <-
     .wait(300); ?current_container(CId); ?target_shelf(Sh);
     !execute_task(CId, Sh).
+
 +error(conflict, _) <- true.
+
 +error(route_blocked, _) <- true.
+
 +error(shelf_full, _) : state(busy) <-
     .my_name(Me); ?current_container(CId); ?target_shelf(Sh);
     .send(scheduler, tell, robot_error(Me, CId, shelf_full));
     -+state(idle); -current_container(CId); -target_shelf(Sh).
+
 +error(Tipo, _) <-
     .my_name(Me); .send(scheduler, tell, robot_error(Me, none, Tipo));
     -+state(idle).
+
 -!execute_task(CId, ShelfId) <-
     .print("[Robot-Heavy] FALLO ", CId);
     .my_name(Me);
