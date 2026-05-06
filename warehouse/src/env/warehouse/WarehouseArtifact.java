@@ -480,72 +480,13 @@ public class WarehouseArtifact extends Environment {
     
     /**
      * Acción: request_task()
-     * Solicita una nueva tarea del scheduler
+     * Nota: El scheduler es responsable de asignar estanterías (entorno delgado)
      */
     private boolean executeRequestTask(String agName, Structure action) {
-        try {
-            Robot robot = robots.get(agName);
-            if (robot == null) return false;
-            
-            // Si ya está ocupado, no asignar nueva tarea
-            if (robot.isBusy() || robot.isCarrying()) {
-                return true;
-            }
-            
-            // Buscar contenedor pendiente
-            Container container = pendingContainers.poll();
-            if (container == null) {
-                return true; // No hay tareas pendientes
-            }
-            
-            // Verificar si el robot puede manejar el contenedor
-            if (!robot.canCarry(container)) {
-                // Devolver a la cola
-                pendingContainers.offer(container);
-                return true;
-            }
-            
-            // Buscar estantería apropiada
-            Shelf bestShelf = findBestShelf(container);
-            if (bestShelf == null) {
-                // No hay estanterías disponibles, devolver a la cola
-                pendingContainers.offer(container);
-                addError(agName, "no_shelf_available", "No shelf available for container");
-                return true;
-            }
-            
-            // Asignar tarea
-            taskAssignments.put(container.getId(), agName);
-            robot.setBusy(true);
-            robot.setCurrentTask(container.getId());
-            
-            // Notificar al agente
-            addPercept(agName, Literal.parseLiteral(
-                "task(\"" + container.getId() + "\",\"" + bestShelf.getId() + "\")"
-            ));
-            
-            System.out.println("Task assigned to " + agName + ": " + container.getId() + " -> " + bestShelf.getId());
-            
-            return true;
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
+        return true;
     }
     
-    /**
-     * Encuentra la mejor estantería para un contenedor
-     */
-    private Shelf findBestShelf(Container container) {
-        List<Shelf> availableShelves = shelves.values().stream()
-            .filter(s -> s.canStore(container))
-            .sorted(Comparator.comparingDouble(Shelf::getOccupancyPercentage))
-            .collect(Collectors.toList());
-        
-        return availableShelves.isEmpty() ? null : availableShelves.get(0);
-    }
-    
+
     /**
      * Acción: get_container_info(ContainerId)
      * Obtiene información sobre un contenedor
@@ -576,73 +517,7 @@ public class WarehouseArtifact extends Environment {
         }
     }
     
-    /**
-     * Acción: get_free_shelf(ContainerId)
-     * Busca una estantería libre para un contenedor
-     */
-    private boolean executeGetFreeShelf(String agName, Structure action) {
-        try {
-            String containerId = action.getTerm(0).toString().replace("\"", "");
-            Container container = containers.get(containerId);
-            
-            if (container == null) {
-                return false;
-            }
-            
-            Shelf shelf = findBestShelf(container);
-            if (shelf != null) {
-                addPercept(agName, Literal.parseLiteral(
-                    "free_shelf(\"" + containerId + "\",\"" + shelf.getId() + "\")"
-                ));
-                return true;
-            }
-            
-            return false;
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-    
-    /**
-     * Acción: scan_surroundings()
-     * Escanea las celdas alrededor del robot
-     */
-    private boolean executeScanSurroundings(String agName, Structure action) {
-        try {
-            Robot robot = robots.get(agName);
-            if (robot == null) return false;
-            
-            int x = robot.getX();
-            int y = robot.getY();
-            
-            // Escanear celdas adyacentes
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dy = -2; dy <= 2; dy++) {
-                    int nx = x + dx;
-                    int ny = y + dy;
-                    
-                    if (nx >= 0 && nx < GRID_WIDTH && ny >= 0 && ny < GRID_HEIGHT) {
-                        CellType type = grid[nx][ny];
-                        addPercept(agName, Literal.parseLiteral(
-                            "cell(" + nx + "," + ny + "," + type.name().toLowerCase() + ")"
-                        ));
-                        
-                        if (type == CellType.BLOCKED) {
-                            addPercept(agName, Literal.parseLiteral("blocked(" + nx + "," + ny + ")"));
-                        }
-                    }
-                }
-            }
-            
-            return true;
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
+
     
     /**
      * Agrega un error a las percepciones
