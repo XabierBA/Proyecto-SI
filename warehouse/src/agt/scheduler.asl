@@ -126,7 +126,10 @@ stat_errors(0).
 
 +task_complete(CId, Robot)[source(_)] : true <-
     ?stat_completed(NC); -stat_completed(NC); +stat_completed(NC+1);
-    .print("[Scheduler] Completado: ", Robot, " entrego ", CId);
+    /* Seguimiento persistente: que paquete esta en que estanteria */
+    ?robot_task(Robot, CId, ShelfId);
+    +stored_at(CId, ShelfId);
+    .print("[Scheduler] Completado: ", Robot, " entrego ", CId, " en ", ShelfId);
     .send(supervisor, tell, task_done(CId, Robot));    /* Notificar supervisor */
     -robot_status(Robot, busy);
     +robot_status(Robot, idle);
@@ -236,11 +239,9 @@ stat_errors(0).
     : shelf_fits("shelf_9", Weight, W*H)
     <- ShelfId = "shelf_9".
 
-/* Ninguna cabe: usar get_free_shelf del entorno como fallback */
-+!find_best_shelf(CId, W, H, Weight, ShelfId) <-
-    get_free_shelf(CId);
-    ?free_shelf(CId, ShelfId);
-    -free_shelf(CId, ShelfId).
+/* Ninguna estanteria cabe: el plan falla y do_assign maneja el error */
+-!find_best_shelf(_, _, _, _, _) <-
+    .print("[Scheduler] Sin estanteria disponible").
 
 
 /* ============================================================================

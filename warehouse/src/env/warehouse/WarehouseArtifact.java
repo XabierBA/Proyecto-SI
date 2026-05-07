@@ -6,7 +6,6 @@ import jason.environment.grid.Location;
 
 import java.util.*;
 import java.util.concurrent.*;
-import java.util.stream.Collectors;
 
 /**
  * Artefacto del almacén automatizado
@@ -17,6 +16,19 @@ public class WarehouseArtifact extends Environment {
     // Dimensiones del almacén
     private static final int GRID_WIDTH = 20;
     private static final int GRID_HEIGHT = 15;
+
+    // Posiciones en forma de L tumbada con el brazo largo abajo y el brazo
+    // corto arriba a la derecha, en la parte exterior de la zona de entrada
+    // (borde sur con el almacen + borde este con la zona de clasificacion):
+    //
+    //   . . X       <- (2,0)
+    //   X X X       <- (0,1) (1,1) (2,1)
+    //
+    // La esquina superior izquierda (0,0) y la celda (1,0) quedan libres,
+    // dando a los robots un pasillo recto por la fila y=0 para rodear.
+    private static final int[][] L_POSITIONS = {
+        {2, 0}, {0, 1}, {1, 1}, {2, 1}
+    };
     
     // Estructuras de datos del almacén
     private CellType[][] grid;
@@ -191,6 +203,10 @@ public class WarehouseArtifact extends Environment {
                     
                     // Generar contenedor aleatorio
                     Container container = generateRandomContainer();
+                    if (container == null) {
+                        // Zona de entrada llena, esperar al siguiente ciclo
+                        continue;
+                    }
                     containers.put(container.getId(), container);
                     pendingContainers.offer(container);
                     
@@ -198,12 +214,16 @@ public class WarehouseArtifact extends Environment {
                     
                     // Log a la consola de la GUI
                     if (view != null) {
-                        view.logMessage(String.format("🆕 New container: %s (%.1fkg, %s)", 
-                            container.getId(), container.getWeight(), container.getType()));
+                        view.logMessage(String.format("🆕 New container: %s (%.1fkg, %s) @(%d,%d)",
+                            container.getId(), container.getWeight(), container.getType(),
+                            container.getX(), container.getY()));
                     }
                     
-                    // Notificar a los agentes
+                    // Notificar a los agentes (percepciones globales)
                     addPercept(Literal.parseLiteral("new_container(\"" + container.getId() + "\")"));
+                    addPercept(Literal.parseLiteral(
+                        "container_at(\"" + container.getId() + "\","
+                        + container.getX() + "," + container.getY() + ")"));
                     
                     if (view != null) {
                         view.update();
@@ -264,9 +284,34 @@ public class WarehouseArtifact extends Environment {
         else type = "urgent";
         
         Container container = new Container(id, size[0], size[1], weight, type);
-        container.setPosition(1, 1); // Posición inicial en zona de entrada
-        
+
+        // Buscar primera posición libre en la L de la zona de entrada
+        int[] pos = findFreeLPosition();
+        if (pos == null) {
+            return null; // todas las posiciones ocupadas; saltar generación
+        }
+        container.setPosition(pos[0], pos[1]);
+
         return container;
+    }
+
+    /**
+     * Busca la primera posición libre en la L de la zona de entrada.
+     * Devuelve null si todas están ocupadas.
+     */
+    private int[] findFreeLPosition() {
+        for (int[] pos : L_POSITIONS) {
+            boolean free = true;
+            for (Container c : containers.values()) {
+                if (!c.isPicked() && c.getAssignedShelf() == null
+                        && c.getX() == pos[0] && c.getY() == pos[1]) {
+                    free = false;
+                    break;
+                }
+            }
+            if (free) return pos;
+        }
+        return null;
     }
     
     @Override
@@ -281,14 +326,8 @@ public class WarehouseArtifact extends Environment {
                     return executePickup(agName, action);
                 case "drop_at":
                     return executeDropAt(agName, action);
-                case "request_task":
-                    return executeRequestTask(agName, action);
                 case "get_container_info":
                     return executeGetContainerInfo(agName, action);
-                case "get_free_shelf":
-                    return executeGetFreeShelf(agName, action);
-                case "scan_surroundings":
-                    return executeScanSurroundings(agName, action);
                 default:
                     System.err.println("Unknown action: " + actionName);
                     return false;
@@ -330,6 +369,16 @@ public class WarehouseArtifact extends Environment {
             for (Robot other : robots.values()) {
                 if (!other.getId().equals(agName) && other.getX() == targetX && other.getY() == targetY) {
                     addError(agName, "conflict", "Conflict with " + other.getId());
+                    return false;
+                }
+            }
+
+            // Verificar contenedores en el destino (no se puede pasar por encima)
+            for (Container c : containers.values()) {
+                if (!c.isPicked() && c.getAssignedShelf() == null
+                        && c.getX() == targetX && c.getY() == targetY) {
+                    addError(agName, "container_blocking",
+                        "Container " + c.getId() + " at (" + targetX + "," + targetY + ")");
                     return false;
                 }
             }
@@ -396,6 +445,9 @@ public class WarehouseArtifact extends Environment {
             if (robot.pickup(container)) {
                 container.setPicked(true);
                 addPercept(agName, Literal.parseLiteral("picked(\"" + containerId + "\")"));
+                // Retirar percepción global del contenedor (ya no está en el suelo)
+                removePerceptsByUnif(Literal.parseLiteral(
+                    "container_at(\"" + containerId + "\",_,_)"));
                 
                 if (view != null) {
                     view.logMessage(String.format("📦 %s picked up %s (%.1fkg)", agName, containerId, container.getWeight()));
@@ -434,8 +486,15 @@ public class WarehouseArtifact extends Environment {
                 return false;
             }
             
-            // Verificar distancia a la estantería
-            if (robot.distanceTo(shelf.getX(), shelf.getY()) > 2) {
+            // Verificar distancia al contorno de la estantería (cualquier celda perimetral)
+            int minDist = Integer.MAX_VALUE;
+            for (int dx = 0; dx < shelf.getWidth(); dx++) {
+                for (int dy = 0; dy < shelf.getHeight(); dy++) {
+                    int d = robot.distanceTo(shelf.getX() + dx, shelf.getY() + dy);
+                    if (d < minDist) minDist = d;
+                }
+            }
+            if (minDist > 1) {
                 addError(agName, "too_far", "Shelf too far away");
                 return false;
             }
@@ -479,74 +538,6 @@ public class WarehouseArtifact extends Environment {
     }
     
     /**
-     * Acción: request_task()
-     * Solicita una nueva tarea del scheduler
-     */
-    private boolean executeRequestTask(String agName, Structure action) {
-        try {
-            Robot robot = robots.get(agName);
-            if (robot == null) return false;
-            
-            // Si ya está ocupado, no asignar nueva tarea
-            if (robot.isBusy() || robot.isCarrying()) {
-                return true;
-            }
-            
-            // Buscar contenedor pendiente
-            Container container = pendingContainers.poll();
-            if (container == null) {
-                return true; // No hay tareas pendientes
-            }
-            
-            // Verificar si el robot puede manejar el contenedor
-            if (!robot.canCarry(container)) {
-                // Devolver a la cola
-                pendingContainers.offer(container);
-                return true;
-            }
-            
-            // Buscar estantería apropiada
-            Shelf bestShelf = findBestShelf(container);
-            if (bestShelf == null) {
-                // No hay estanterías disponibles, devolver a la cola
-                pendingContainers.offer(container);
-                addError(agName, "no_shelf_available", "No shelf available for container");
-                return true;
-            }
-            
-            // Asignar tarea
-            taskAssignments.put(container.getId(), agName);
-            robot.setBusy(true);
-            robot.setCurrentTask(container.getId());
-            
-            // Notificar al agente
-            addPercept(agName, Literal.parseLiteral(
-                "task(\"" + container.getId() + "\",\"" + bestShelf.getId() + "\")"
-            ));
-            
-            System.out.println("Task assigned to " + agName + ": " + container.getId() + " -> " + bestShelf.getId());
-            
-            return true;
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-    
-    /**
-     * Encuentra la mejor estantería para un contenedor
-     */
-    private Shelf findBestShelf(Container container) {
-        List<Shelf> availableShelves = shelves.values().stream()
-            .filter(s -> s.canStore(container))
-            .sorted(Comparator.comparingDouble(Shelf::getOccupancyPercentage))
-            .collect(Collectors.toList());
-        
-        return availableShelves.isEmpty() ? null : availableShelves.get(0);
-    }
-    
-    /**
      * Acción: get_container_info(ContainerId)
      * Obtiene información sobre un contenedor
      */
@@ -567,74 +558,6 @@ public class WarehouseArtifact extends Environment {
                 container.getWeight() + ",\"" + 
                 container.getType() + "\")"
             ));
-            
-            return true;
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-    
-    /**
-     * Acción: get_free_shelf(ContainerId)
-     * Busca una estantería libre para un contenedor
-     */
-    private boolean executeGetFreeShelf(String agName, Structure action) {
-        try {
-            String containerId = action.getTerm(0).toString().replace("\"", "");
-            Container container = containers.get(containerId);
-            
-            if (container == null) {
-                return false;
-            }
-            
-            Shelf shelf = findBestShelf(container);
-            if (shelf != null) {
-                addPercept(agName, Literal.parseLiteral(
-                    "free_shelf(\"" + containerId + "\",\"" + shelf.getId() + "\")"
-                ));
-                return true;
-            }
-            
-            return false;
-            
-        } catch (Exception e) {
-            e.printStackTrace();
-            return false;
-        }
-    }
-    
-    /**
-     * Acción: scan_surroundings()
-     * Escanea las celdas alrededor del robot
-     */
-    private boolean executeScanSurroundings(String agName, Structure action) {
-        try {
-            Robot robot = robots.get(agName);
-            if (robot == null) return false;
-            
-            int x = robot.getX();
-            int y = robot.getY();
-            
-            // Escanear celdas adyacentes
-            for (int dx = -2; dx <= 2; dx++) {
-                for (int dy = -2; dy <= 2; dy++) {
-                    int nx = x + dx;
-                    int ny = y + dy;
-                    
-                    if (nx >= 0 && nx < GRID_WIDTH && ny >= 0 && ny < GRID_HEIGHT) {
-                        CellType type = grid[nx][ny];
-                        addPercept(agName, Literal.parseLiteral(
-                            "cell(" + nx + "," + ny + "," + type.name().toLowerCase() + ")"
-                        ));
-                        
-                        if (type == CellType.BLOCKED) {
-                            addPercept(agName, Literal.parseLiteral("blocked(" + nx + "," + ny + ")"));
-                        }
-                    }
-                }
-            }
             
             return true;
             
