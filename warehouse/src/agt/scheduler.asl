@@ -1,116 +1,127 @@
 /*******************************************************************************
- * SCHEDULER - Agente Planificador Mejorado
+ * SCHEDULER - Coordinador con Seleccion Inteligente de Estanteria
  * 
- * CAMBIOS:
- * 1. Delega get_container_info al scheduler (no al entorno)
- * 2. Persistencia de localización: container_location(CId, ShelfId) permanente
- * 3. Mejora de selección de estantería con histórico
+ * Universidad de Vigo - Sistemas Inteligentes
+ * Curso 2025-2026
+ * 
+ * CAPACIDADES:
+ *   - Clasificacion automatica de contenedores
+ *   - Priorizacion de robots: light > medium > heavy
+ *   - Seleccion de la estanteria mas pequena disponible
+ *   - Seguimiento de estadisticas y gestion de errores
+ * 
  ******************************************************************************/
 
 /* ============================================================================
- * CREENCIAS INICIALES
- * ============================================================================ */
-
+ *  Declaracion de capacidades de los robots:
+ *  Estanterias: shelf_data(Id, MaxWeight, MaxVolume, CurrentWeight, CurrentVolume)
+ *  Pequenas (fila 1): 50kg, vol 8
+ *  Medianas (fila 2): 100kg, vol 12
+ *  Grandes (fila 3): 200kg, vol 20        
+ *  ============================================================================ */
+   
 robot_capacity(robot_light,  10,  1, 1, 3).
 robot_capacity(robot_medium, 30,  1, 2, 2).
 robot_capacity(robot_heavy,  100, 2, 3, 1).
 
+/* Estado inicial de los robots */
 robot_status(robot_light,  idle).
 robot_status(robot_medium, idle).
 robot_status(robot_heavy,  idle).
 
-stat_received(0).
-stat_assigned(0).
-stat_errors(0).
+/* Tarea actual asignada a cada robot */
+robot_task(robot_light, none, none).
+robot_task(robot_medium, none, none).
+robot_task(robot_heavy, none, none).
 
-/* Posiciones de estanterías */
-shelf_pos("shelf_1", 10, 2).
-shelf_pos("shelf_2", 12, 2).
-shelf_pos("shelf_3", 14, 2).
-shelf_pos("shelf_4", 16, 2).
-shelf_pos("shelf_5", 10, 6).
-shelf_pos("shelf_6", 13, 6).
-shelf_pos("shelf_7", 16, 6).
-shelf_pos("shelf_8", 10, 10).
-shelf_pos("shelf_9", 14, 10).
-
-/* Capacidades de estanterías */
-shelf_capacity("shelf_1", 50).
-shelf_capacity("shelf_2", 50).
-shelf_capacity("shelf_3", 50).
-shelf_capacity("shelf_4", 50).
-shelf_capacity("shelf_5", 100).
-shelf_capacity("shelf_6", 100).
-shelf_capacity("shelf_7", 100).
-shelf_capacity("shelf_8", 200).
-shelf_capacity("shelf_9", 200).
-
-/* Ocupación de estanterías */
-shelf_usage("shelf_1", 0).
-shelf_usage("shelf_2", 0).
-shelf_usage("shelf_3", 0).
-shelf_usage("shelf_4", 0).
-shelf_usage("shelf_5", 0).
-shelf_usage("shelf_6", 0).
-shelf_usage("shelf_7", 0).
-shelf_usage("shelf_8", 0).
-shelf_usage("shelf_9", 0).
 
 /* ============================================================================
- * INICIALIZACIÓN
+ *   Declaracion de estanterias:
+ *  shelf_data(Id, MaxWeight, MaxVolume, CurrentWeight, CurrentVolume)
+ *   - Pequenas (fila 1): 50kg, volumen 8
+ *   - Medianas (fila 2): 100kg, volumen 12
+ *   - Grandes (fila 3): 200kg, volumen 20 
+ * ============================================================================ */
+
+shelf_data("shelf_1", 50, 8, 0, 0).
+shelf_data("shelf_2", 50, 8, 0, 0).
+shelf_data("shelf_3", 50, 8, 0, 0).
+shelf_data("shelf_4", 50, 8, 0, 0).
+shelf_data("shelf_5", 100, 12, 0, 0).
+shelf_data("shelf_6", 100, 12, 0, 0).
+shelf_data("shelf_7", 100, 12, 0, 0).
+shelf_data("shelf_8", 200, 20, 0, 0).
+shelf_data("shelf_9", 200, 20, 0, 0).
+
+/* Prioridad de estanteria: menor indice = probar primero */
+/* Primero pequenas, luego medianas y por ultimo grandes */
+shelf_order(1, "shelf_1").
+shelf_order(2, "shelf_2").
+shelf_order(3, "shelf_3").
+shelf_order(4, "shelf_4").
+shelf_order(5, "shelf_5").
+shelf_order(6, "shelf_6").
+shelf_order(7, "shelf_7").
+shelf_order(8, "shelf_8").
+shelf_order(9, "shelf_9").
+
+/* Regla: una estanteria puede almacenar un contenedor
+ * si no supera ni el peso ni el volumen maximos */
+shelf_fits(ShelfId, Weight, Area) :-
+    shelf_data(ShelfId, MaxW, MaxV, CurW, CurV) &
+    CurW + Weight <= MaxW &
+    CurV + Area <= MaxV.
+
+/* Estadisticas globales del scheduler */
+stat_received(0).
+stat_assigned(0).
+stat_completed(0).
+stat_errors(0).
+
+
+/* ============================================================================
+ * PLANES PRINCIPALES
  * ============================================================================ */
 
 !start.
 
-+!start : true <-
-    .print("[Scheduler] ============================================");
-    .print("[Scheduler]  Sistema de planificación iniciado");
-    .print("[Scheduler]  Prioridad: robot_light -> robot_medium -> robot_heavy");
-    .print("[Scheduler]  Requisitos: Entorno delgado & Trazabilidad de cajas");
-    .print("[Scheduler] ============================================").
+/* Iniciamos el scheduler */
++!start : true <- .print("[Scheduler] Iniciado").
+
 
 /* ============================================================================
- * DETECCIÓN DE NUEVO CONTENEDOR
+ * DETECCION DE NUEVOS CONTENEDORES
  * ============================================================================ */
+
+/* Si llega un contenedor nuevo y aun no esta pendiente, aumentar estadisticas y solicitar su informacion */
 
 +new_container(CId) : not pending(CId, _, _, _, _) <-
     ?stat_received(N); -stat_received(N); +stat_received(N+1);
-    .print("[Scheduler] Nuevo contenedor en entrada: ", CId);
-    /* El scheduler solicita info del contenedor al entorno */
     get_container_info(CId).
 
-+new_container(CId) : pending(CId, _, _, _, _) <-
-    true.
+/* Si el contenedor ya estaba registrado como pendiente, ignorarlo */
++new_container(CId) : pending(CId, _, _, _, _) <- true.
+
 
 /* ============================================================================
- * INFORMACIÓN DEL CONTENEDOR RECIBIDA
+ * CLASIFICACION DE CONTENEDORES
  * ============================================================================ */
 
+/* Al recibir la informacion del contenedor, guardarlo como pendiente, notificar al supervisor e intentar asignarlo */
+ 
 +container_info(CId, W, H, Weight, Type) : true <-
     -container_info(CId, W, H, Weight, Type);
-    .print("[Scheduler]   Info: ", CId, " = ", Weight, "kg, ", W, "x", H, ", tipo: ", Type);
+    .print("[Scheduler] Recibido ", CId, ": ", Weight, "kg ", W, "x", H, " ", Type);
+    /* Notificar al supervisor */
+    .send(supervisor, tell, container_counted(CId, W, H, Weight, Type));
     +pending(CId, W, H, Weight, Type);
     !try_assign_pending.
 
+
 /* ============================================================================
- * TAREA COMPLETADA - PERSISTENCIA DE LOCALIZACIÓN
+ * GESTION DE ROBOTS LIBRES
  * ============================================================================ */
 
-<<<<<<< Updated upstream
-+task_complete(CId, Robot, ShelfId) : true <-
-    .print("[Scheduler] ", Robot, " completó: ", CId, " -> ", ShelfId);
-    
-    /* [PERSISTENCIA] Guardar localización permanente del contenedor */
-    +container_location(CId, ShelfId);
-    
-    /* Actualizar ocupación de estantería */
-    ?assigned_weight(CId, Weight);
-    -assigned_weight(CId, Weight);
-    ?shelf_usage(ShelfId, Usage);
-    -shelf_usage(ShelfId, Usage);
-    +shelf_usage(ShelfId, Usage + Weight);
-    
-=======
 /* Cuando un robot completa una tarea, actualizar estadisticas, avisar al supervisor, liberar al robot y continuar asignando pendientes */
 
 +task_complete(CId, Robot)[source(_)] : true <-
@@ -120,142 +131,165 @@ shelf_usage("shelf_9", 0).
     +stored_at(CId, ShelfId);
     .print("[Scheduler] Completado: ", Robot, " entrego ", CId, " en ", ShelfId);
     .send(supervisor, tell, task_done(CId, Robot));    /* Notificar supervisor */
->>>>>>> Stashed changes
     -robot_status(Robot, busy);
     +robot_status(Robot, idle);
-    -task_complete(CId, Robot, ShelfId)[source(_)];
+    -robot_task(Robot, _, _);
+    +robot_task(Robot, none, none);
+    -task_complete(CId, Robot)[source(_)];
     !try_assign_pending.
 
+
 /* ============================================================================
- * CICLO DE ASIGNACIÓN
+ * CICLO DE ASIGNACION
  * ============================================================================ */
 
-+try_assign_pending : pending(CId, W, H, Weight, Type) <-
+/* Mientras exista algun contenedor pendiente, intentar asignarlo */
++!try_assign_pending : pending(CId, W, H, Weight, Type) <-
     !try_assign(CId, W, H, Weight, Type);
     !try_assign_pending.
 
+/* Si ya no quedan contenedores pendientes, terminar */
 +!try_assign_pending : not pending(_, _, _, _, _) <- true.
 
+/* Prioridad de asignacion de robots: light > medium > heavy */
+
+/* Si robot_light puede transportar el contenedor y esta libre, asignarlo */
++!try_assign(CId, W, H, Weight, Type)
+    : robot_capacity(robot_light, MW, MWd, MHt, _)
+    & Weight <= MW & W <= MWd & H <= MHt
+    & robot_status(robot_light, idle)
+    <- !do_assign(CId, W, H, Weight, Type, robot_light).
+
+/* Si robot_medium puede transportar el contenedor y esta libre, asignarlo */
++!try_assign(CId, W, H, Weight, Type)
+    : robot_capacity(robot_medium, MW, MWd, MHt, _)
+    & Weight <= MW & W <= MWd & H <= MHt
+    & robot_status(robot_medium, idle)
+    <- !do_assign(CId, W, H, Weight, Type, robot_medium).
+
+/* Si robot_heavy puede transportar el contenedor y esta libre, asignarlo */
++!try_assign(CId, W, H, Weight, Type)
+    : robot_capacity(robot_heavy, MW, MWd, MHt, _)
+    & Weight <= MW & W <= MWd & H <= MHt
+    & robot_status(robot_heavy, idle)
+    <- !do_assign(CId, W, H, Weight, Type, robot_heavy).
+
+/* Si ningun robot puede asumir la tarea en este momento, no hacer nada */
++!try_assign(CId, W, H, Weight, Type) : true <- true.
+
+
 /* ============================================================================
- * LÓGICA DE ASIGNACIÓN CON PRIORIDAD
+ * SELECCION DE ESTANTERIA Y ASIGNACION
  * ============================================================================ */
 
-+!try_assign(CId, W, H, Weight, Type) :
-        robot_capacity(robot_light, MaxW, MaxWidth, MaxHeight, _) &
-        Weight =< MaxW & W =< MaxWidth & H =< MaxHeight &
-        robot_status(robot_light, idle) <-
-    !do_assign(CId, W, H, Weight, Type, robot_light).
-
-+!try_assign(CId, W, H, Weight, Type) :
-        robot_capacity(robot_medium, MaxW, MaxWidth, MaxHeight, _) &
-        Weight =< MaxW & W =< MaxWidth & H =< MaxHeight &
-        robot_status(robot_medium, idle) <-
-    !do_assign(CId, W, H, Weight, Type, robot_medium).
-
-+!try_assign(CId, W, H, Weight, Type) :
-        robot_capacity(robot_heavy, MaxW, MaxWidth, MaxHeight, _) &
-        Weight =< MaxW & W =< MaxWidth & H =< MaxHeight &
-        robot_status(robot_heavy, idle) <-
-    !do_assign(CId, W, H, Weight, Type, robot_heavy).
-
-+!try_assign(CId, W, H, Weight, Type) : true <-
-    .print("[Scheduler] En espera: Sin robot disponible para ", CId, " (", Weight, "kg)").
-
-/* ============================================================================
- * EJECUTAR ASIGNACIÓN - SELECCIÓN INTELIGENTE DE ESTANTERÍA
- * ============================================================================ */
+/* Buscar la mejor estanteria disponible, actualizar estados, reservar capacidad y enviar la tarea al robot */
 
 +!do_assign(CId, W, H, Weight, Type, Robot) : true <-
-    !select_best_shelf(Weight, Type, ShelfId);
-    
+    !find_best_shelf(CId, W, H, Weight, ShelfId);
     -pending(CId, W, H, Weight, Type);
     -robot_status(Robot, idle);
     +robot_status(Robot, busy);
-    
-    /* Guardar peso para actualizar ocupación al completar */
-    +assigned_weight(CId, Weight);
-    +assigned_target(CId, ShelfId);
-    
+    -robot_task(Robot, _, _);
+    +robot_task(Robot, CId, ShelfId);
+    /* Actualizar ocupacion de estanteria */
+    ?shelf_data(ShelfId, MaxW, MaxV, CurW, CurV);
+    -shelf_data(ShelfId, MaxW, MaxV, CurW, CurV);
+    +shelf_data(ShelfId, MaxW, MaxV, CurW + Weight, CurV + W*H);
     .send(Robot, tell, task(CId, ShelfId));
-    .print("[Scheduler] Asignado: ", Robot, " -> ", CId, " @ ", ShelfId);
+    .print("[Scheduler] ", Robot, " <- ", CId, " (", Weight, "kg ", Type, ") -> ", ShelfId);
     ?stat_assigned(N); -stat_assigned(N); +stat_assigned(N+1).
 
+/* Si no se encuentra una estanteria valida, informar por pantalla */
 -!do_assign(CId, W, H, Weight, Type, Robot) : true <-
-    .print("[Scheduler] Alerta: No se pudo asignar estantería para ", CId).
+    .print("[Scheduler] Sin estanteria para ", CId).
 
-/* ============================================================================
- * SELECCIÓN INTELIGENTE DE ESTANTERÍA
- * ============================================================================ */
+/* Buscar la estanteria mas pequena que pueda almacenar el contenedor */
+/* Probar en orden: shelf_1..4 (pequenas), shelf_5..7 (medianas), shelf_8..9 (grandes) */
 
-+!select_best_shelf(Weight, "urgent", ShelfId) : shelf_pos(ShelfId, _, _) <- 
-    ShelfId = "shelf_1".
+/* Probar primero las estanterias pequenas */
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_1", Weight, W*H)
+    <- ShelfId = "shelf_1".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_2", Weight, W*H)
+    <- ShelfId = "shelf_2".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_3", Weight, W*H)
+    <- ShelfId = "shelf_3".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_4", Weight, W*H)
+    <- ShelfId = "shelf_4".
 
-+!select_best_shelf(Weight, _, ShelfId) : Weight =< 10 <-
-    !find_less_used_shelf(["shelf_1", "shelf_2", "shelf_3", "shelf_4"], ShelfId).
+/* Si no cabe en pequenas, probar las medianas */
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_5", Weight, W*H)
+    <- ShelfId = "shelf_5".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_6", Weight, W*H)
+    <- ShelfId = "shelf_6".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_7", Weight, W*H)
+    <- ShelfId = "shelf_7".
 
-+!select_best_shelf(Weight, _, ShelfId) : Weight =< 30 <-
-    !find_less_used_shelf(["shelf_5", "shelf_6", "shelf_7"], ShelfId).
+/* Si no cabe en medianas, probar las grandes */
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_8", Weight, W*H)
+    <- ShelfId = "shelf_8".
++!find_best_shelf(CId, W, H, Weight, ShelfId)
+    : shelf_fits("shelf_9", Weight, W*H)
+    <- ShelfId = "shelf_9".
 
-<<<<<<< Updated upstream
-+!select_best_shelf(Weight, _, ShelfId) : true <-
-    !find_less_used_shelf(["shelf_8", "shelf_9"], ShelfId).
-=======
 /* Ninguna estanteria cabe: el plan falla y do_assign maneja el error */
 -!find_best_shelf(_, _, _, _, _) <-
     .print("[Scheduler] Sin estanteria disponible").
->>>>>>> Stashed changes
 
-/* Encuentra la estantería menos usada de una lista */
-+!find_less_used_shelf([ShelfId], ShelfId) <- true.
-
-+!find_less_used_shelf([H|T], BestShelf) : true <-
-    !find_best_in_list([H|T], H, BestShelf).
-
-+!find_best_in_list([S], Current, Current) <- true.
-
-+!find_best_in_list([H|T], Current, BestShelf) : true <-
-    ?shelf_usage(H, UsageH);
-    ?shelf_usage(Current, UsageCurrent);
-    (UsageH < UsageCurrent ->
-        !find_best_in_list(T, H, BestShelf)
-    ;
-        !find_best_in_list(T, Current, BestShelf)
-    ).
 
 /* ============================================================================
  * MANEJO DE ERRORES
  * ============================================================================ */
 
-+robot_error(Robot, CId, ErrorType) : pending(CId, W, H, Weight, Type) <-
-    .print("[Scheduler] Error '", ErrorType, "' en ", Robot, " con ", CId);
+/* Si ocurre un error con un contenedor que sigue pendiente,
+ * registrar el error, liberar al robot e intentar reasignarlo */
++robot_error(Robot, CId, ErrorType)[source(_)]
+    : pending(CId, W, H, Weight, Type) <-
+    .print("[Scheduler] Error ", ErrorType, " de ", Robot, " con ", CId);
     ?stat_errors(N); -stat_errors(N); +stat_errors(N+1);
-    -robot_status(Robot, busy);
-    +robot_status(Robot, idle);
-    (assigned_target(CId, _) -> -assigned_target(CId, _) ; true);
-    (assigned_weight(CId, _) -> -assigned_weight(CId, _) ; true);
+    .send(supervisor, tell, error_occurred(Robot, CId, ErrorType));
+    -robot_status(Robot, busy); +robot_status(Robot, idle);
+    -robot_task(Robot, _, _); +robot_task(Robot, none, none);
+    -robot_error(Robot, CId, ErrorType)[source(_)];
     !try_assign(CId, W, H, Weight, Type).
 
-+robot_error(Robot, CId, ErrorType) : not pending(CId, _, _, _, _) <-
-    .print("[Scheduler] Error '", ErrorType, "' en ", Robot);
+/* Si ocurre un error con un contenedor no pendiente,
+ * registrar el error, liberar al robot y continuar con el resto */
++robot_error(Robot, CId, ErrorType)[source(_)]
+    : not pending(CId, _, _, _, _) <-
+    .print("[Scheduler] Error ", ErrorType, " de ", Robot);
     ?stat_errors(N); -stat_errors(N); +stat_errors(N+1);
-    -robot_status(Robot, busy);
-    +robot_status(Robot, idle);
-    (assigned_target(CId, _) -> -assigned_target(CId, _) ; true);
-    (assigned_weight(CId, _) -> -assigned_weight(CId, _) ; true);
+    .send(supervisor, tell, error_occurred(Robot, CId, ErrorType));
+    -robot_status(Robot, busy); +robot_status(Robot, idle);
+    -robot_task(Robot, _, _); +robot_task(Robot, none, none);
+    -robot_error(Robot, CId, ErrorType)[source(_)];
     !try_assign_pending.
 
+
 /* ============================================================================
- * ESTADO DEL SCHEDULER
+ * CONSULTA DE ESTADO
  * ============================================================================ */
 
-+!print_status : true <-
-    ?stat_received(R);
-    ?stat_assigned(A);
-    ?stat_errors(E);
-    .print("[Scheduler] -- Estado del sistema --------------------");
-    .print("[Scheduler]  Contenedores recibidos: ", R);
-    .print("[Scheduler]  Asignaciones realizadas: ", A);
-    .print("[Scheduler]  Errores gestionados: ", E);
-    .print("[Scheduler] -------------------------------------------").
+/* Mostrar estadisticas globales y estado actual de cada robot */
++!estado : true <-
+    ?stat_received(R); ?stat_assigned(A); ?stat_completed(C); ?stat_errors(E);
+    ?robot_status(robot_light, SL);
+    ?robot_status(robot_medium, SM);
+    ?robot_status(robot_heavy, SH);
+    ?robot_task(robot_light, TL, DL);
+    ?robot_task(robot_medium, TM, DM);
+    ?robot_task(robot_heavy, TH, DH);
+    .print("[Scheduler] Recibidos:", R, " Asignados:", A, " Completados:", C, " Errores:", E);
+    .print("[Scheduler] Light=", SL, " [", TL, "->", DL, "]");
+    .print("[Scheduler] Medium=", SM, " [", TM, "->", DM, "]");
+    .print("[Scheduler] Heavy=", SH, " [", TH, "->", DH, "]").
 
-+!estado : true <- !print_status.
+/* Alias para imprimir el estado del scheduler */
++!print_status : true <- !estado.

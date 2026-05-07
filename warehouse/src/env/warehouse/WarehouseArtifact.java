@@ -538,18 +538,6 @@ public class WarehouseArtifact extends Environment {
     }
     
     /**
-<<<<<<< Updated upstream
-     * Acción: request_task()
-     * Nota: El scheduler es responsable de asignar estanterías (entorno delgado)
-     */
-    private boolean executeRequestTask(String agName, Structure action) {
-        return true;
-    }
-    
-
-    /**
-=======
->>>>>>> Stashed changes
      * Acción: get_container_info(ContainerId)
      * Obtiene información sobre un contenedor
      */
@@ -579,11 +567,6 @@ public class WarehouseArtifact extends Environment {
         }
     }
     
-<<<<<<< Updated upstream
-
-    
-=======
->>>>>>> Stashed changes
     /**
      * Agrega un error a las percepciones
      */

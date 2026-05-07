@@ -47,19 +47,6 @@ container_blocked(X,Y) :- container_at(_, X, Y).
 /* Celda transitable: ni bloqueada por estanteria/borde ni con contenedor */
 walkable(X,Y) :- not blocked(X,Y) & not container_blocked(X,Y).
 
-/* Una celda es 'segura' como punto de aproximacion a un contenedor si es
- * transitable y tiene al menos 2 vecinos ortogonales tambien transitables
- * (no es un callejon sin salida del que el robot no pueda escapar despues
- * de recoger el paquete). */
-two_walkables(X,Y) :- walkable(X+1,Y) & walkable(X-1,Y).
-two_walkables(X,Y) :- walkable(X+1,Y) & walkable(X,Y+1).
-two_walkables(X,Y) :- walkable(X+1,Y) & walkable(X,Y-1).
-two_walkables(X,Y) :- walkable(X-1,Y) & walkable(X,Y+1).
-two_walkables(X,Y) :- walkable(X-1,Y) & walkable(X,Y-1).
-two_walkables(X,Y) :- walkable(X,Y+1) & walkable(X,Y-1).
-
-safe_cell(X,Y) :- walkable(X,Y) & two_walkables(X,Y).
-
 
 /* ============================================================================
  * INICIO Y BUCLE PRINCIPAL
