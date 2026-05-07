@@ -34,192 +34,157 @@ shelf_cell(14,10). shelf_cell(15,10). shelf_cell(16,10). shelf_cell(17,10).
 shelf_cell(14,11). shelf_cell(15,11). shelf_cell(16,11). shelf_cell(17,11).
 shelf_cell(14,12). shelf_cell(15,12). shelf_cell(16,12). shelf_cell(17,12).
 
-/* Definición de Zonas Especiales (para evitar tráfico) */
-// Salida: (0,0) a (2,1)
-is_exit_zone(X,Y) :- X >= 0 & X <= 2 & Y >= 0 & Y <= 1.
-// Clasificación: (3,0) a (4,1)
-is_class_zone(X,Y) :- X >= 3 & X <= 4 & Y >= 0 & Y <= 1.
-// Entrada: (5,0) a (7,1)
-is_entry_zone(X,Y) :- X >= 5 & X <= 7 & Y >= 0 & Y <= 1.
-
-/* Bloqueo por estanterias, bordes y zonas de trabajo */
+/* Bloqueo por estanterias y bordes */
 blocked(X,Y) :- shelf_cell(X,Y).
+blocked(X,Y) :- X < 0.
+blocked(X,Y) :- X >= 20.
+blocked(X,Y) :- Y < 0.
+blocked(X,Y) :- Y >= 15.
 
-/* Bloqueo de bordes del mapa (0-19 en X, 0-14 en Y) */
-blocked(X,Y) :- X < 0 | X >= 20 | Y < 0 | Y >= 15.
-
-/* NUEVA REGLA: Zona prohibida desde (0,0) hasta (6,0) */
-/* Nota: Si quieres que no pisen la fila 0 desde la columna 0 a la 6: */
-blocked(X,Y) :- X >= 0 & X <= 6 & Y == 0.
-blocked(X,Y) :- X >= 0 & X <= 7 & Y == 1.
-
-
-/* REGLA CRÍTICA: Los robots solo pueden entrar en las zonas de trabajo... */
-// (Aquí sigue el resto de tu código...)
-
-/* REGLA CRÍTICA: Los robots solo pueden entrar en las zonas de trabajo 
-   si tienen una tarea asignada. Si no, se consideran bloqueadas para navegación general.
-*/
-blocked(X,Y) :- is_exit_zone(X,Y) & not state(busy).
-blocked(X,Y) :- is_class_zone(X,Y) & not state(busy).
-
-/* Una celda está bloqueada si tiene CUALQUIER contenedor (incluido el mío) */
+/* Una celda esta bloqueada para acercarse si tiene un contenedor en el suelo */
 container_blocked(X,Y) :- container_at(_, X, Y).
 
-/* Celda transitable: Suelo vacío, sin estanterías ni contenedores de ningún tipo */
-walkable(X,Y) :- not blocked(X,Y) & not container_blocked(X,Y).
-
-
-
-
-/* REGLA CRÍTICA: Los robots solo pueden entrar en las zonas de trabajo 
-   si tienen una tarea asignada. Si no, se consideran bloqueadas para navegación general.
-*/
-blocked(X,Y) :- is_exit_zone(X,Y) & not state(busy).
-blocked(X,Y) :- is_class_zone(X,Y) & not state(busy).
-
-/* Una celda está bloqueada si tiene CUALQUIER contenedor (incluido el mío) */
-container_blocked(X,Y) :- container_at(_, X, Y).
-
-/* Celda transitable: Suelo vacío, sin estanterías ni contenedores de ningún tipo */
+/* Celda transitable: ni bloqueada por estanteria/borde ni con contenedor */
 walkable(X,Y) :- not blocked(X,Y) & not container_blocked(X,Y).
 
 
 /* ============================================================================
-   INICIO Y BUCLE PRINCIPAL (Corregido)
-   ============================================================================ */
+ * INICIO Y BUCLE PRINCIPAL
+ * ============================================================================ */
 
 !start.
 
-+!start <- .my_name(Me); .print("[", Me, "] Iniciado autónomamente");!main_loop.
-
-// Caso 1: Está libre y NO está en su base -> Vuelve un paso y chequea
-+!main_loop : state(idle) & base(BX, BY) & not position(BX, BY) <-
-    !return_step;
-    !check_for_tasks; 
-    .wait(300);
++!start <-
+    .my_name(Me);
+    .print("[", Me, "] Iniciado");
     !main_loop.
 
-// Caso 2: Está libre y YA está en su base -> Espera y chequea
++!main_loop : state(idle) & returning(no) & base(BX, BY) & not position(BX, BY) <-
+    -+returning(yes); !return_step; !main_loop.
+
++!main_loop : state(idle) & returning(yes) & base(BX, BY) & not position(BX, BY) <-
+    !return_step; !main_loop.
+
+/* NUEVO: idle en base -> busca trabajo pendiente */
 +!main_loop : state(idle) <-
-    !check_for_tasks;
+    -+returning(no);
+    !check_pending;
     .wait(1000);
     !main_loop.
 
-// Caso 3: Está ocupado -> Espera a que termine la tarea
-+!main_loop : state(busy) <- 
-    .wait(1000); 
-    !main_loop.
++!main_loop : state(busy) <- .wait(500); !main_loop.
+
 
 /* ============================================================================
-   LÓGICA DE AUTONOMÍA
-   ============================================================================ */
-/* ============================================================================
-    LÓGICA DE PRIORIDAD Y ASIGNACIÓN
-   ============================================================================ */
-
-+!check_for_tasks : pending_container(CId, W, H, Weight, Type)[source(scheduler)] <-
-    // 1. Calculamos un retraso basado en nuestra capacidad (Prioridad)
-    ?my_capacity(MaxWeight, _, _);
-    
-    // Jerarquía: Light (0ms) < Medium (400ms) < Heavy (800ms)
-    if (MaxWeight <= 10) { 
-        Delay = 0; 
-    } else { 
-        if (MaxWeight <= 30) { Delay = 400; }
-        else { Delay = 800; }
-    }
-    
-    .wait(Delay);
-    
-    // 2. Tras la espera, comprobamos si el paquete SIGUE disponible
-    // Si un robot más pequeño lo tomó, ya no existirá la creencia.
-    if (pending_container(CId, W, H, Weight, Type)) {
-        !intentar_tomar_tarea(CId, W, H, Weight, Type);
-    }.
-
-+!check_for_tasks <- true.
-
-+!intentar_tomar_tarea(CId, W, H, Weight, Type) : state(idle) <-
-    ?my_capacity(MaxW, MaxH, MaxV);
-    if (Weight <= MaxW) {
-        // --- BLOQUEO DE TAREA ---
-        // 1. Borramos de nuestra mente para no entrar en bucle
-        -pending_container(CId, W, H, Weight, Type)[source(scheduler)];
-        
-        // 2. AVISO A OTROS ROBOTS: Borradlo de vuestra mente inmediatamente
-        .broadcast(untell, pending_container(CId, W, H, Weight, Type));
-        
-        // 3. AVISO AL SCHEDULER: Deja de anunciar este contenedor
-        .send(scheduler, untell, pending_container(CId, W, H, Weight, Type));
-
-        .print("He ganado la prioridad para el contenedor: ", CId);
-        
+ * BUSQUEDA ACTIVA DE TRABAJO PENDIENTE
+ * ============================================================================ */
++pending_container(CId, W, H, Weight, Type)[source(_)]
+    : state(idle) & can_handle(W, H, Weight) & not claimed(CId) <-
+    ?claim_priority(P);
+    .wait(P);                    /* el ligero no espera, el pesado espera más */
+    if (not claimed(CId)) {      /* re-verificar tras la espera */
+        +claimed(CId);
         -+state(busy);
-        !decidir_estanteria(Type, ShelfId);
+        -+returning(no);
+        +current_container(CId);
+        !find_shelf_local(CId, W, H, Weight, Type, ShelfId);
+        +target_shelf(ShelfId);
+        .my_name(Me);
+        .print("[", Me, "] Autoasignado: ", CId, " -> ", ShelfId);
         !execute_task(CId, ShelfId);
     }.
-    // Si es urgente, va a la estantería 1
-+!decidir_estanteria("urgent", "shelf_1").
 
-// Si es standard o fragile, va a la estantería 2 (o la que tú decidas)
-+!decidir_estanteria("standard", "shelf_2").
-+!decidir_estanteria("fragile", "shelf_2").
++pending_container(_, _, _, _, _) <- true.
 
-// Plan genérico por si llega un tipo desconocido (evita que el robot se bloquee)
-+!decidir_estanteria(CualquierTipo, "shelf_2") : true.
+
++!check_pending
+    : pending_container(CId, W, H, Weight, Type)
+    & can_handle(W, H, Weight)
+    & not claimed(CId) <-
+    ?claim_priority(P);
+    .wait(P);
+    if (not claimed(CId)) {
+        +claimed(CId);
+        -+state(busy);
+        -+returning(no);
+        +current_container(CId);
+        !find_shelf_local(CId, W, H, Weight, Type, ShelfId);
+        +target_shelf(ShelfId);
+        .my_name(Me);
+        .print("[", Me, "] Retomando pendiente: ", CId, " -> ", ShelfId);
+        !execute_task(CId, ShelfId);
+    }.
+
++!check_pending <- true.
+
+/* ============================================================================
+ * RETORNO A BASE
+ * ============================================================================ */
+
++!return_step : base(BX, BY) & position(BX, BY) <- -+returning(no).
+
++!return_step : base(BX, BY) & position(MX, MY) & MY < BY & walkable(MX, MY+1) <-
+    ?step_wait(W); move_to(MX, MY+1); .wait(W); -+position(MX, MY+1).
+
++!return_step : base(BX, BY) & position(MX, MY) & MY > BY & walkable(MX, MY-1) <-
+    ?step_wait(W); move_to(MX, MY-1); .wait(W); -+position(MX, MY-1).
+
++!return_step : base(BX, BY) & position(MX, MY) & MX < BX & walkable(MX+1, MY) <-
+    ?step_wait(W); move_to(MX+1, MY); .wait(W); -+position(MX+1, MY).
+
++!return_step : base(BX, BY) & position(MX, MY) & MX > BX & walkable(MX-1, MY) <-
+    ?step_wait(W); move_to(MX-1, MY); .wait(W); -+position(MX-1, MY).
+
++!return_step <- .wait(300).
+-!return_step <- .wait(300).
 
 
 /* ============================================================================
-   EJECUCIÓN DE TAREA (ÚNICO Y LIMPIO)
-   ============================================================================ */
+ * RECEPCION DE TAREAS
+ * ============================================================================ */
 
-+!execute_task(CId, ShelfId) <-
++task(CId, ShelfId)[source(scheduler)] : state(idle) <-
+    -+state(busy);
+    -+returning(no);
     +current_container(CId);
     +target_shelf(ShelfId);
-    
-    .print("Yendo a zona de ENTRADA (5,0)...");
-    !go(5,0); 
-    
-    get_container_info(CId); .wait(400); // Un poco más de tiempo para percibir
+    !execute_task(CId, ShelfId).
+
++task(CId, ShelfId)[source(scheduler)] : state(busy) <-
+    .my_name(Me);
+    .send(scheduler, tell, robot_error(Me, CId, robot_busy)).
+
+/* Ejecucion de la tarea: navega a CUALQUIER celda ortogonalmente contigua
+ * libre del contenedor (no diagonal) y lo recoge. */
++!execute_task(CId, ShelfId) <-
+    get_container_info(CId);
+    .wait(100);
     ?container_at(CId, CX, CY);
-    
-    .print("Recogiendo ", CId, " en ", CX, ",", CY);
     !go_adjacent(CX, CY);
     pickup(CId);
-    .wait(200);
-    
-    .print("Llevando a estantería: ", ShelfId);
+    .wait(100);
     !get_shelf_dest(ShelfId, SX, SY);
     !go(SX, SY);
     drop_at(ShelfId);
-    
-    .print("Tarea finalizada con éxito.");
-    .send(scheduler, tell, task_complete(CId, .my_name));
-    
+    .wait(100);
+    .my_name(Me);
+    .send(scheduler, tell, task_complete(CId, Me));
+    .print("[", Me, "] ", CId, " -> ", ShelfId, " OK");
+    -+state(idle);
     -current_container(CId);
     -target_shelf(ShelfId);
-    -+state(idle).
-/* ... (Aquí añade tus planes de navegación !go, !go_adjacent, !do_step y !get_shelf_dest que ya tenías) ... */
-/* --- 1. Adyacencia sin usar .abs (evita el error de carga) --- */
-+!go_adjacent(CX, CY) : position(MX, MY) & ( (MX == CX & (MY == CY+1 | MY == CY-1)) | (MY == CY & (MX == CX+1 | MX == CX-1)) ) <- 
-    .print("Ya estoy en posición adyacente para recoger.");
-    true.
+    -claimed(CId).
 
-/* --- 2. Modificación de la navegación para ser más robusta --- */
-// Si el plan go_adjacent falla en el test de adyacencia, intentamos movernos
-+!go_adjacent(CX, CY) <-
-    // Intentamos ir a una de las 4 celdas adyacentes al contenedor
-    if (walkable(CX, CY+1)) { !go(CX, CY+1); }
-    else { if (walkable(CX, CY-1)) { !go(CX, CY-1); }
-    else { if (walkable(CX+1, CY)) { !go(CX+1, CY); }
-    else { if (walkable(CX-1, CY)) { !go(CX-1, CY); }
-    else { .wait(500); !go_adjacent(CX, CY); }}}} .
+/* go_adjacent(CX,CY): ir a una celda ortogonalmente contigua a (CX,CY)
+ * que sea transitable (ni estanteria/borde ni otro contenedor).
+ * Se prueban abajo, derecha, izquierda y arriba en ese orden. */
++!go_adjacent(CX, CY) : walkable(CX, CY+1) <- !go(CX, CY+1).
++!go_adjacent(CX, CY) : walkable(CX+1, CY) <- !go(CX+1, CY).
++!go_adjacent(CX, CY) : walkable(CX-1, CY) <- !go(CX-1, CY).
++!go_adjacent(CX, CY) : walkable(CX, CY-1) <- !go(CX, CY-1).
+/* Si todas estan ocupadas momentaneamente, esperar y reintentar */
++!go_adjacent(CX, CY) <- .wait(500); !go_adjacent(CX, CY).
 
-/* --- 3. REGLAS DE BLOQUEO (Relajadas para permitir el inicio) --- */
-// Es mejor que el robot SIEMPRE pueda caminar por las zonas de trabajo 
-// pero que el Scheduler no lo mande allí a descansar.
-// Borra o comenta las reglas de "blocked" basadas en state(busy) si el robot se queda congelado.
 
 /* ============================================================================
  * NAVEGACION
@@ -323,7 +288,105 @@ walkable(X,Y) :- not blocked(X,Y) & not container_blocked(X,Y).
     -+peer_capacity(Peer, MW, MWd, MHt);
     .print("[", Me, "] ", Peer, " capacidad: peso=", MW, ", ", MWd, "x", MHt).
 -!ask_one_peer(_, _) <- true.
+/* ============================================================================
+ * CAPACIDADES Y ESTANTERIAS (LOGICA LOCAL - espejo del scheduler)
+ * Cada robot especifico define: my_capacity(MaxWeight, MaxW, MaxH)
+ * ============================================================================ */
 
+/* Datos de estanterias: shelf_local(Id, MaxWeight, MaxVolume) */
+shelf_local("shelf_1", 50, 8).   shelf_local("shelf_2", 50, 8).
+shelf_local("shelf_3", 50, 8).   shelf_local("shelf_4", 50, 8).
+shelf_local("shelf_5", 100, 12). shelf_local("shelf_6", 100, 12).
+shelf_local("shelf_7", 100, 12). shelf_local("shelf_8", 200, 20).
+shelf_local("shelf_9", 200, 20).
+
+shelf_allows_type_local("shelf_1", "urgent").
+shelf_allows_type_local("shelf_5", "urgent").
+shelf_allows_type_local("shelf_8", "urgent").
+shelf_allows_type_local("shelf_2", "standard"). shelf_allows_type_local("shelf_2", "fragile").
+shelf_allows_type_local("shelf_3", "standard"). shelf_allows_type_local("shelf_3", "fragile").
+shelf_allows_type_local("shelf_4", "standard"). shelf_allows_type_local("shelf_4", "fragile").
+shelf_allows_type_local("shelf_6", "standard"). shelf_allows_type_local("shelf_6", "fragile").
+shelf_allows_type_local("shelf_7", "standard"). shelf_allows_type_local("shelf_7", "fragile").
+shelf_allows_type_local("shelf_9", "standard"). shelf_allows_type_local("shelf_9", "fragile").
+
+/* ¿Puede este robot manejar este contenedor? */
+can_handle(W, H, Weight) :-
+    my_capacity(MW, MWd, MHt) &
+    Weight <= MW &
+    W <= MWd &
+    H <= MHt.
+
+/* Encuentra la estantería más pequeña válida para el contenedor */
+/* (orden de shelf_1 a shelf_9 = preferencia a las más pequeñas primero) */
+shelf_fits_local(ShelfId, Weight, Area, Type) :-
+    shelf_local(ShelfId, MaxW, MaxV) &
+    shelf_allows_type_local(ShelfId, Type) &
+    Weight <= MaxW &
+    Area <= MaxV.
+
+
+/* ============================================================================
+ * AUTOASIGNACION AL DETECTAR pending_container
+ * ============================================================================ */
+
++pending_container(CId, W, H, Weight, Type)[source(_)]
+    : state(idle) & can_handle(W, H, Weight)
+        & not claimed(CId) <-
+    +claimed(CId);                          /* marca atomica anti-doble-asignacion */
+    -+state(busy);
+    -+returning(no);
+    +current_container(CId);
+    !find_shelf_local(CId, W, H, Weight, Type, ShelfId);
+    +target_shelf(ShelfId);
+    .my_name(Me);
+    .print("[", Me, "] Autoasignado: ", CId, " -> ", ShelfId);
+    !execute_task(CId, ShelfId).
+
+/* Robot ocupado o no puede: ignora silenciosamente */
++pending_container(_, _, _, _, _) <- true.
+
+
+/* ============================================================================
+ * SELECCION LOCAL DE ESTANTERIA
+ * ============================================================================ */
+
++!find_shelf_local(_, W, H, Weight, Type, "shelf_1")
+    : shelf_fits_local("shelf_1", Weight, W*H, Type).
++!find_shelf_local(_, W, H, Weight, Type, "shelf_2")
+    : shelf_fits_local("shelf_2", Weight, W*H, Type).
++!find_shelf_local(_, W, H, Weight, Type, "shelf_3")
+    : shelf_fits_local("shelf_3", Weight, W*H, Type).
++!find_shelf_local(_, W, H, Weight, Type, "shelf_4")
+    : shelf_fits_local("shelf_4", Weight, W*H, Type).
++!find_shelf_local(_, W, H, Weight, Type, "shelf_5")
+    : shelf_fits_local("shelf_5", Weight, W*H, Type).
++!find_shelf_local(_, W, H, Weight, Type, "shelf_6")
+    : shelf_fits_local("shelf_6", Weight, W*H, Type).
++!find_shelf_local(_, W, H, Weight, Type, "shelf_7")
+    : shelf_fits_local("shelf_7", Weight, W*H, Type).
++!find_shelf_local(_, W, H, Weight, Type, "shelf_8")
+    : shelf_fits_local("shelf_8", Weight, W*H, Type).
++!find_shelf_local(_, W, H, Weight, Type, "shelf_9")
+    : shelf_fits_local("shelf_9", Weight, W*H, Type).
+
+/* Fallback: usa la default_shelf del robot específico */
+-!find_shelf_local(CId, W, H, Weight, Type, ShelfId) <-
+    ?default_shelf(D); ShelfId = D;
+    .my_name(Me);
+    .print("[", Me, "] Sin estanteria ideal para ", CId, ", usando default: ", D).
+
+
+/* ============================================================================
+ * LIMPIEZA AL COMPLETAR TAREA (reemplaza el execute_task existente al final)
+ * ============================================================================ */
+/* Añadir -claimed(CId) en la linea de limpieza del execute_task ya existente:
+ *
+ *   -+state(idle); -current_container(CId); -target_shelf(ShelfId); -claimed(CId).
+ *
+ * y en el handler de fallo (-!execute_task):
+ *   -+state(idle); -current_container(CId); -target_shelf(ShelfId); -claimed(CId).
+ * ============================================================================ */
 
 /* ============================================================================
  * MANEJO DE ERRORES (con consulta previa a peers)

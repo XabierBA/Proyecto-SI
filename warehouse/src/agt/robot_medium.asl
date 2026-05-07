@@ -18,3 +18,4 @@ base(2,3).
 step_wait(300).            /* velocidad media */
 my_capacity(30, 1, 2).     /* peso, ancho, alto */
 default_shelf("shelf_5").
+claim_priority(300).    
