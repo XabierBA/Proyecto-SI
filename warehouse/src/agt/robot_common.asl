@@ -70,86 +70,137 @@ container_blocked(X,Y) :- container_at(_, X, Y).
 walkable(X,Y) :- not blocked(X,Y) & not container_blocked(X,Y).
 
 
+
+
+/* REGLA CRÍTICA: Los robots solo pueden entrar en las zonas de trabajo 
+   si tienen una tarea asignada. Si no, se consideran bloqueadas para navegación general.
+*/
+blocked(X,Y) :- is_exit_zone(X,Y) & not state(busy).
+blocked(X,Y) :- is_class_zone(X,Y) & not state(busy).
+
+/* Una celda está bloqueada si tiene CUALQUIER contenedor (incluido el mío) */
+container_blocked(X,Y) :- container_at(_, X, Y).
+
+/* Celda transitable: Suelo vacío, sin estanterías ni contenedores de ningún tipo */
+walkable(X,Y) :- not blocked(X,Y) & not container_blocked(X,Y).
+
+
 /* ============================================================================
- * INICIO Y BUCLE PRINCIPAL
- * ============================================================================ */
+   INICIO Y BUCLE PRINCIPAL (Corregido)
+   ============================================================================ */
 
 !start.
 
-+!start <-
-    .my_name(Me);
-    .print("[", Me, "] Iniciado");
++!start <- .my_name(Me); .print("[", Me, "] Iniciado autónomamente");!main_loop.
+
+// Caso 1: Está libre y NO está en su base -> Vuelve un paso y chequea
++!main_loop : state(idle) & base(BX, BY) & not position(BX, BY) <-
+    !return_step;
+    !check_for_tasks; 
+    .wait(300);
     !main_loop.
 
-+!main_loop : state(idle) & returning(no) & base(BX, BY) & not position(BX, BY) <-
-    -+returning(yes); !return_step; !main_loop.
-
-+!main_loop : state(idle) & returning(yes) & base(BX, BY) & not position(BX, BY) <-
-    !return_step; !main_loop.
-
+// Caso 2: Está libre y YA está en su base -> Espera y chequea
 +!main_loop : state(idle) <-
-    -+returning(no); .wait(1000); !main_loop.
+    !check_for_tasks;
+    .wait(1000);
+    !main_loop.
 
-+!main_loop : state(busy) <- .wait(500); !main_loop.
+// Caso 3: Está ocupado -> Espera a que termine la tarea
++!main_loop : state(busy) <- 
+    .wait(1000); 
+    !main_loop.
+
+/* ============================================================================
+   LÓGICA DE AUTONOMÍA
+   ============================================================================ */
+/* ============================================================================
+    LÓGICA DE PRIORIDAD Y ASIGNACIÓN
+   ============================================================================ */
+
++!check_for_tasks : pending_container(CId, W, H, Weight, Type)[source(scheduler)] <-
+    // 1. Calculamos un retraso basado en nuestra capacidad (Prioridad)
+    ?my_capacity(MaxWeight, _, _);
+    
+    // Jerarquía: Light (0ms) < Medium (400ms) < Heavy (800ms)
+    if (MaxWeight <= 10) { 
+        Delay = 0; 
+    } else { 
+        if (MaxWeight <= 30) { Delay = 400; }
+        else { Delay = 800; }
+    }
+    
+    .wait(Delay);
+    
+    // 2. Tras la espera, comprobamos si el paquete SIGUE disponible
+    // Si un robot más pequeño lo tomó, ya no existirá la creencia.
+    if (pending_container(CId, W, H, Weight, Type)) {
+        !intentar_tomar_tarea(CId, W, H, Weight, Type);
+    }.
+
++!check_for_tasks <- true.
+
++!intentar_tomar_tarea(CId, W, H, Weight, Type) : state(idle) <-
+    ?my_capacity(MaxW, MaxH, MaxV);
+    if (Weight <= MaxW) {
+        // --- BLOQUEO DE TAREA ---
+        // 1. Borramos de nuestra mente para no entrar en bucle
+        -pending_container(CId, W, H, Weight, Type)[source(scheduler)];
+        
+        // 2. AVISO A OTROS ROBOTS: Borradlo de vuestra mente inmediatamente
+        .broadcast(untell, pending_container(CId, W, H, Weight, Type));
+        
+        // 3. AVISO AL SCHEDULER: Deja de anunciar este contenedor
+        .send(scheduler, untell, pending_container(CId, W, H, Weight, Type));
+
+        .print("He ganado la prioridad para el contenedor: ", CId);
+        
+        -+state(busy);
+        !decidir_estanteria(Type, ShelfId);
+        !execute_task(CId, ShelfId);
+    }.
+    // Si es urgente, va a la estantería 1
++!decidir_estanteria("urgent", "shelf_1").
+
+// Si es standard o fragile, va a la estantería 2 (o la que tú decidas)
++!decidir_estanteria("standard", "shelf_2").
++!decidir_estanteria("fragile", "shelf_2").
+
+// Plan genérico por si llega un tipo desconocido (evita que el robot se bloquee)
++!decidir_estanteria(CualquierTipo, "shelf_2") : true.
 
 
 /* ============================================================================
- * RETORNO A BASE
- * ============================================================================ */
+   EJECUCIÓN DE TAREA (ÚNICO Y LIMPIO)
+   ============================================================================ */
 
-+!return_step : base(BX, BY) & position(BX, BY) <- -+returning(no).
-
-+!return_step : base(BX, BY) & position(MX, MY) & MY < BY & walkable(MX, MY+1) <-
-    ?step_wait(W); move_to(MX, MY+1); .wait(W); -+position(MX, MY+1).
-
-+!return_step : base(BX, BY) & position(MX, MY) & MY > BY & walkable(MX, MY-1) <-
-    ?step_wait(W); move_to(MX, MY-1); .wait(W); -+position(MX, MY-1).
-
-+!return_step : base(BX, BY) & position(MX, MY) & MX < BX & walkable(MX+1, MY) <-
-    ?step_wait(W); move_to(MX+1, MY); .wait(W); -+position(MX+1, MY).
-
-+!return_step : base(BX, BY) & position(MX, MY) & MX > BX & walkable(MX-1, MY) <-
-    ?step_wait(W); move_to(MX-1, MY); .wait(W); -+position(MX-1, MY).
-
-+!return_step <- .wait(300).
--!return_step <- .wait(300).
-
-
-/* ============================================================================
- * RECEPCION DE TAREAS
- * ============================================================================ */
-
-+task(CId, ShelfId)[source(scheduler)] : state(idle) <-
-    -+state(busy);
-    -+returning(no);
++!execute_task(CId, ShelfId) <-
     +current_container(CId);
     +target_shelf(ShelfId);
-    !execute_task(CId, ShelfId).
-
-+task(CId, ShelfId)[source(scheduler)] : state(busy) <-
-    .my_name(Me);
-    .send(scheduler, tell, robot_error(Me, CId, robot_busy)).
-
-/* Ejecucion de la tarea: navega a CUALQUIER celda ortogonalmente contigua
- * libre del contenedor (no diagonal) y lo recoge. */
-+!execute_task(CId, ShelfId) <-
-    get_container_info(CId);
-    .wait(100);
+    
+    .print("Yendo a zona de ENTRADA (5,0)...");
+    !go(5,0); 
+    
+    get_container_info(CId); .wait(400); // Un poco más de tiempo para percibir
     ?container_at(CId, CX, CY);
+    
+    .print("Recogiendo ", CId, " en ", CX, ",", CY);
     !go_adjacent(CX, CY);
     pickup(CId);
-    .wait(100);
+    .wait(200);
+    
+    .print("Llevando a estantería: ", ShelfId);
     !get_shelf_dest(ShelfId, SX, SY);
     !go(SX, SY);
     drop_at(ShelfId);
-    .wait(100);
-    .my_name(Me);
-    .send(scheduler, tell, task_complete(CId, Me));
-    .print("[", Me, "] ", CId, " -> ", ShelfId, " OK");
-    -+state(idle);
+    
+    .print("Tarea finalizada con éxito.");
+    .send(scheduler, tell, task_complete(CId, .my_name));
+    
     -current_container(CId);
-    -target_shelf(ShelfId).
-
+    -target_shelf(ShelfId);
+    -+state(idle).
+/* ... (Aquí añade tus planes de navegación !go, !go_adjacent, !do_step y !get_shelf_dest que ya tenías) ... */
 /* --- 1. Adyacencia sin usar .abs (evita el error de carga) --- */
 +!go_adjacent(CX, CY) : position(MX, MY) & ( (MX == CX & (MY == CY+1 | MY == CY-1)) | (MY == CY & (MX == CX+1 | MX == CX-1)) ) <- 
     .print("Ya estoy en posición adyacente para recoger.");
