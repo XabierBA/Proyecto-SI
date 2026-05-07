@@ -1,7 +1,26 @@
 package warehouse;
 
-import javax.swing.*;
-import java.awt.*;
+import java.awt.BasicStroke;
+import java.awt.BorderLayout;
+import java.awt.Color;
+import java.awt.Component;
+import java.awt.Dimension;
+import java.awt.Font;
+import java.awt.FontMetrics;
+import java.awt.Graphics;
+import java.awt.Graphics2D;
+import java.awt.RenderingHints;
+
+import javax.swing.BorderFactory;
+import javax.swing.Box;
+import javax.swing.BoxLayout;
+import javax.swing.JFrame;
+import javax.swing.JLabel;
+import javax.swing.JPanel;
+import javax.swing.JScrollPane;
+import javax.swing.JTextArea;
+import javax.swing.SwingUtilities;
+import javax.swing.Timer;
 
 /**
  * Vista visual 2D del almacén
@@ -245,39 +264,54 @@ public class WarehouseView extends JFrame {
                     int px = x * CELL_SIZE;
                     int py = y * CELL_SIZE;
                     
-                    // Color según tipo de celda
-                    switch (grid[x][y]) {
-                        case EMPTY:
-                            g.setColor(new Color(250, 250, 250));
-                            break;
-                        case ENTRANCE:
-                            g.setColor(new Color(200, 255, 200));
-                            break;
-                        case CLASSIFICATION:
-                            g.setColor(new Color(255, 255, 200));
-                            break;
-                        case STORAGE:
-                            g.setColor(new Color(220, 220, 255));
-                            break;
-                        case SHELF:
-                            g.setColor(new Color(180, 180, 200));
-                            break;
-                        case BLOCKED:
-                            g.setColor(new Color(255, 100, 100));
-                            break;
-                        default:
-                            g.setColor(Color.WHITE);
+                    // --- PRIORIDAD: ZONAS ESPECÍFICAS POR COORDENADAS ---
+                    
+                    // 1. ZONA DE SALIDA: (0,0) (0,1) (1,0) (1,1) (2,0) (2,1)
+                    if (x >= 0 && x <= 2 && y >= 0 && y <= 1) {
+                        g.setColor(new Color(255, 200, 200)); // Rojo suave
+                    }
+                    // 2. ZONA DE CLASIFICACIÓN: (3,0) (3,1) (4,0) (4,1)
+                    else if (x >= 3 && x <= 4 && y >= 0 && y <= 1) {
+                        g.setColor(new Color(255, 255, 180)); // Amarillo suave
+                    }
+                    // 3. ZONA DE ENTRADA: (5,0) (5,1) (6,0) (6,1) (7,0) (7,1)
+                    else if (x >= 5 && x <= 7 && y >= 0 && y <= 1) {
+                        g.setColor(new Color(200, 255, 200)); // Verde suave
+                    }
+                    // 4. RESTO DEL ALMACÉN: Según el tipo de celda del grid
+                    else {
+                        switch (grid[x][y]) {
+                            case STORAGE:
+                                g.setColor(new Color(230, 230, 255)); // Azulado
+                                break;
+                            case SHELF:
+                                g.setColor(new Color(210, 210, 210)); // Gris (suelo bajo estante)
+                                break;
+                            case BLOCKED:
+                                g.setColor(new Color(150, 150, 150)); // Gris oscuro
+                                break;
+                            default:
+                                g.setColor(new Color(250, 250, 250)); // Blanco/Vacío
+                                break;
+                        }
                     }
                     
+                    // Dibujar el fondo
                     g.fillRect(px, py, CELL_SIZE, CELL_SIZE);
                     
-                    // Borde de celda
-                    g.setColor(new Color(200, 200, 200));
+                    // Dibujar el borde de la celda (cuadrícula)
+                    g.setColor(new Color(220, 220, 220));
                     g.drawRect(px, py, CELL_SIZE, CELL_SIZE);
+                    
+                    // --- ETIQUETAS DE TEXTO (OPCIONAL para guiarte) ---
+                    g.setFont(new Font("Arial", Font.BOLD, 10));
+                    g.setColor(new Color(100, 100, 100));
+                    if (x == 1 && y == 0) g.drawString("OUT", px + 5, py + 15);
+                    if (x == 3 && y == 0) g.drawString("CLASS", px + 2, py + 15);
+                    if (x == 6 && y == 0) g.drawString("IN", px + 10, py + 15);
                 }
             }
         }
-        
         private void drawShelves(Graphics2D g) {
             for (Shelf shelf : warehouse.getShelves().values()) {
                 int px = shelf.getX() * CELL_SIZE;

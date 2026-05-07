@@ -1,11 +1,17 @@
 package warehouse;
 
-import jason.asSyntax.*;
-import jason.environment.Environment;
-import jason.environment.grid.Location;
+import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
-import java.util.*;
-import java.util.concurrent.*;
+import jason.asSyntax.Literal;
+import jason.asSyntax.NumberTerm;
+import jason.asSyntax.Structure;
+import jason.environment.Environment;
 
 /**
  * Artefacto del almacén automatizado
@@ -26,8 +32,9 @@ public class WarehouseArtifact extends Environment {
     //
     // La esquina superior izquierda (0,0) y la celda (1,0) quedan libres,
     // dando a los robots un pasillo recto por la fila y=0 para rodear.
+    // Posiciones actualizadas para la nueva zona de entrada (5,0 a 7,1)
     private static final int[][] L_POSITIONS = {
-        {2, 0}, {0, 1}, {1, 1}, {2, 1}
+        {7, 0}, {5, 1}, {6, 1}, {7, 1}
     };
     
     // Estructuras de datos del almacén
@@ -102,7 +109,7 @@ public class WarehouseArtifact extends Environment {
     }
     
     /**
-     * Inicializa el grid con zonas
+     * Inicializa el grid con zonas reorganizadas
      */
     private void initializeGrid() {
         // Inicializar todos como vacíos
@@ -112,17 +119,24 @@ public class WarehouseArtifact extends Environment {
             }
         }
         
-        // Zona de entrada (arriba izquierda)
-        for (int x = 0; x < 3; x++) {
-            for (int y = 0; y < 2; y++) {
-                grid[x][y] = CellType.ENTRANCE;
+        // Zona de SALIDA: (0,0) a (2,1)
+        for (int x = 0; x <= 2; x++) {
+            for (int y = 0; y <= 1; y++) {
+                grid[x][y] = CellType.EXIT; 
             }
         }
         
-        // Zona de clasificación
-        for (int x = 3; x < 7; x++) {
-            for (int y = 0; y < 2; y++) {
+        // Zona de CLASIFICACIÓN: (3,0) a (4,1)
+        for (int x = 3; x <= 4; x++) {
+            for (int y = 0; y <= 1; y++) {
                 grid[x][y] = CellType.CLASSIFICATION;
+            }
+        }
+
+        // Zona de ENTRADA: (5,0) a (7,1)
+        for (int x = 5; x <= 7; x++) {
+            for (int y = 0; y <= 1; y++) {
+                grid[x][y] = CellType.ENTRANCE;
             }
         }
     }
@@ -131,18 +145,26 @@ public class WarehouseArtifact extends Environment {
      * Crea los robots iniciales
      */
     private void initializeRobots() {
-        Robot light = new Robot("robot_light", "light", 10, 1, 1, 3);
-        light.setPosition(1, 3);
-        robots.put("robot_light", light);
-        
-        Robot medium = new Robot("robot_medium", "medium", 30, 1, 2, 2);
-        medium.setPosition(2, 3);
-        robots.put("robot_medium", medium);
-        
-        Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
-        heavy.setPosition(3, 3);
-        robots.put("robot_heavy", heavy);
-    }
+    // Robot Light
+    Robot light = new Robot("robot_light", "light", 10, 1, 1, 3);
+    light.setPosition(1, 3);
+    robots.put("robot_light", light);
+    
+    // Robot Medium
+    Robot medium = new Robot("robot_medium", "medium", 30, 1, 2, 2);
+    medium.setPosition(2, 3);
+    robots.put("robot_medium", medium);
+    
+    // Robot Heavy 1 (Cambiamos el nombre a robot_heavy_1)
+    Robot heavy = new Robot("robot_heavy", "heavy", 100, 2, 3, 1);
+    heavy.setPosition(3, 3);
+    robots.put("robot_heavy", heavy);
+
+    // Robot Heavy 2 (Nueva instancia con ID único y posición distinta)
+    //Robot heavy2 = new Robot("robot_heavy_2", "heavy", 100, 2, 3, 1);
+    //heavy2.setPosition(4, 3); // Lo ponemos en la celda de al lado
+    //robots.put("robot_heavy_2", heavy2);
+}
     
     /**
      * Crea las estanterías del almacén
@@ -197,7 +219,7 @@ public class WarehouseArtifact extends Environment {
             Random rand = new Random();
             while (running) {
                 try {
-                    Thread.sleep(5000 + rand.nextInt(5000)); // Entre 5 y 10 segundos
+                    Thread.sleep(3000); // Entre 5 y 10 segundos
                     
                     if (!running) break;
                     
@@ -414,51 +436,35 @@ public class WarehouseArtifact extends Environment {
     private boolean executePickup(String agName, Structure action) {
         try {
             String containerId = action.getTerm(0).toString().replace("\"", "");
-            
             Robot robot = robots.get(agName);
             Container container = containers.get(containerId);
-            
-            if (robot == null || container == null) {
-                addError(agName, "invalid_pickup", "Robot or container not found");
-                return false;
-            }
-            
-            // Verificar distancia
+
+            if (robot == null || container == null) return false;
+
             if (robot.distanceTo(container.getX(), container.getY()) > 1) {
-                addError(agName, "too_far", "Container too far away");
+                addError(agName, "too_far", "Distancia insuficiente");
                 return false;
             }
-            
-            // Verificar capacidad
-            if (!robot.canCarry(container)) {
-                if (container.getWeight() > robot.getMaxWeight()) {
-                    addError(agName, "container_too_heavy", 
-                        "Container " + containerId + " is too heavy for " + agName);
-                } else {
-                    addError(agName, "container_too_big", 
-                        "Container " + containerId + " is too big for " + agName);
-                }
-                return false;
-            }
-            
-            // Recoger contenedor
+
             if (robot.pickup(container)) {
                 container.setPicked(true);
-                addPercept(agName, Literal.parseLiteral("picked(\"" + containerId + "\")"));
-                // Retirar percepción global del contenedor (ya no está en el suelo)
-                removePerceptsByUnif(Literal.parseLiteral(
-                    "container_at(\"" + containerId + "\",_,_)"));
                 
+                // === LÍNEAS CRÍTICAS A MODIFICAR/AÑADIR ===
+                // Borrar inmediatamente la percepción de posición para TODOS los agentes
+                removePerceptsByUnif(Literal.parseLiteral("container_at(\"" + containerId + "\",_,_)"));
+                removePerceptsByUnif(Literal.parseLiteral("new_container(\"" + containerId + "\")"));
+                
+                // Quitar de la cola de pendientes interna del Java
+                pendingContainers.removeIf(c -> c.getId().equals(containerId));
+                // =========================================
+
                 if (view != null) {
-                    view.logMessage(String.format("📦 %s picked up %s (%.1fkg)", agName, containerId, container.getWeight()));
+                    view.logMessage(String.format("📦 %s recogió %s", agName, containerId));
                     view.update();
                 }
-                
                 return true;
             }
-            
             return false;
-            
         } catch (Exception e) {
             e.printStackTrace();
             return false;
