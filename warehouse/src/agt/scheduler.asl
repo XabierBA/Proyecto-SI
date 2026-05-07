@@ -96,6 +96,7 @@ shelf_usage("shelf_9", 0).
  * TAREA COMPLETADA - PERSISTENCIA DE LOCALIZACIÓN
  * ============================================================================ */
 
+<<<<<<< Updated upstream
 +task_complete(CId, Robot, ShelfId) : true <-
     .print("[Scheduler] ", Robot, " completó: ", CId, " -> ", ShelfId);
     
@@ -109,6 +110,17 @@ shelf_usage("shelf_9", 0).
     -shelf_usage(ShelfId, Usage);
     +shelf_usage(ShelfId, Usage + Weight);
     
+=======
+/* Cuando un robot completa una tarea, actualizar estadisticas, avisar al supervisor, liberar al robot y continuar asignando pendientes */
+
++task_complete(CId, Robot)[source(_)] : true <-
+    ?stat_completed(NC); -stat_completed(NC); +stat_completed(NC+1);
+    /* Seguimiento persistente: que paquete esta en que estanteria */
+    ?robot_task(Robot, CId, ShelfId);
+    +stored_at(CId, ShelfId);
+    .print("[Scheduler] Completado: ", Robot, " entrego ", CId, " en ", ShelfId);
+    .send(supervisor, tell, task_done(CId, Robot));    /* Notificar supervisor */
+>>>>>>> Stashed changes
     -robot_status(Robot, busy);
     +robot_status(Robot, idle);
     -task_complete(CId, Robot, ShelfId)[source(_)];
@@ -184,8 +196,14 @@ shelf_usage("shelf_9", 0).
 +!select_best_shelf(Weight, _, ShelfId) : Weight =< 30 <-
     !find_less_used_shelf(["shelf_5", "shelf_6", "shelf_7"], ShelfId).
 
+<<<<<<< Updated upstream
 +!select_best_shelf(Weight, _, ShelfId) : true <-
     !find_less_used_shelf(["shelf_8", "shelf_9"], ShelfId).
+=======
+/* Ninguna estanteria cabe: el plan falla y do_assign maneja el error */
+-!find_best_shelf(_, _, _, _, _) <-
+    .print("[Scheduler] Sin estanteria disponible").
+>>>>>>> Stashed changes
 
 /* Encuentra la estantería menos usada de una lista */
 +!find_less_used_shelf([ShelfId], ShelfId) <- true.
