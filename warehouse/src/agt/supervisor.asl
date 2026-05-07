@@ -25,6 +25,24 @@ standard_count(0).
 fragile_count(0).
 urgent_count(0).
 
+/* Estado de espacio por grupo de tipo:
+ *   space_full(urgent)   -> no hay hueco en shelf_1/5/8
+ *   space_full(nonurgent)-> no hay hueco en shelf_2/3/4/6/7/9
+ * Ausencia del belief = hay espacio disponible */
+
+/* Estado inicial de ocupacion de estanterias (peso actual, volumen actual).
+ * Se actualiza con shelf_report del scheduler tras cada tarea completada.
+ * Inicializado a 0,0 para que any_*_shelf_free sea verdadero al arrancar. */
+shelf_state("shelf_1", 0, 0).
+shelf_state("shelf_2", 0, 0).
+shelf_state("shelf_3", 0, 0).
+shelf_state("shelf_4", 0, 0).
+shelf_state("shelf_5", 0, 0).
+shelf_state("shelf_6", 0, 0).
+shelf_state("shelf_7", 0, 0).
+shelf_state("shelf_8", 0, 0).
+shelf_state("shelf_9", 0, 0).
+
 
 /* ============================================================================
  * PLANES PRINCIPALES
@@ -79,26 +97,100 @@ urgent_count(0).
  * MENSAJES DEL SCHEDULER
  * ============================================================================ */
 
-/* Cuando el scheduler notifica un contenedor standard, aumentar su contador */
-+container_counted(CId, W, H, Weight, "standard")[source(_)] <-
-    ?standard_count(N); -standard_count(N); +standard_count(N+1).
+/* Cuando el scheduler notifica un contenedor standard, aumentar su contador y comprobar espacio.
+ * Solo procesamos el mensaje si viene del scheduler para evitar duplicados de otros agentes. */
++container_counted(CId, W, H, Weight, "standard")[source(scheduler)] <-
+    ?standard_count(N); -standard_count(N); +standard_count(N+1);
+    !check_space(nonurgent).
 
-/* Cuando el scheduler notifica un contenedor fragile, aumentar su contador */
-+container_counted(CId, W, H, Weight, "fragile")[source(_)] <-
-    ?fragile_count(N); -fragile_count(N); +fragile_count(N+1).
+/* Ignorar container_counted de fuentes que no sean el scheduler */
++container_counted(CId, W, H, Weight, "standard")[source(S)] : S \== scheduler <- true.
 
-/* Cuando el scheduler notifica un contenedor urgent, aumentar su contador */
-+container_counted(CId, W, H, Weight, "urgent")[source(_)] <-
-    ?urgent_count(N); -urgent_count(N); +urgent_count(N+1).
+/* Cuando el scheduler notifica un contenedor fragile, aumentar su contador y comprobar espacio */
++container_counted(CId, W, H, Weight, "fragile")[source(scheduler)] <-
+    ?fragile_count(N); -fragile_count(N); +fragile_count(N+1);
+    !check_space(nonurgent).
 
-/* Cuando una tarea termina correctamente, actualizar el total completado */
-+task_done(CId, Robot)[source(_)] <-
-    ?total_completados(N); -total_completados(N); +total_completados(N+1).
++container_counted(CId, W, H, Weight, "fragile")[source(S)] : S \== scheduler <- true.
+
+/* Cuando el scheduler notifica un contenedor urgent, aumentar su contador y comprobar espacio */
++container_counted(CId, W, H, Weight, "urgent")[source(scheduler)] <-
+    ?urgent_count(N); -urgent_count(N); +urgent_count(N+1);
+    !check_space(urgent).
+
++container_counted(CId, W, H, Weight, "urgent")[source(S)] : S \== scheduler <- true.
+
+
+/* ============================================================================
+ * DETECCION DE FALTA DE ESPACIO
+ * ============================================================================ */
+
+/* Regla: una estanteria urgente tiene hueco si su capacidad no esta llena
+ * (usamos un peso/volumen minimo simbolico de 1kg/1u para detectar si PODRIA caber algo) */
+any_urgent_shelf_free :-
+    ( shelf_state("shelf_1", CW, CV) & CW < 50  & CV < 8  ) |
+    ( shelf_state("shelf_5", CW, CV) & CW < 100 & CV < 12 ) |
+    ( shelf_state("shelf_8", CW, CV) & CW < 200 & CV < 20 ).
+
+any_nonurgent_shelf_free :-
+    ( shelf_state("shelf_2", CW, CV) & CW < 50  & CV < 8  ) |
+    ( shelf_state("shelf_3", CW, CV) & CW < 50  & CV < 8  ) |
+    ( shelf_state("shelf_4", CW, CV) & CW < 50  & CV < 8  ) |
+    ( shelf_state("shelf_6", CW, CV) & CW < 100 & CV < 12 ) |
+    ( shelf_state("shelf_7", CW, CV) & CW < 100 & CV < 12 ) |
+    ( shelf_state("shelf_9", CW, CV) & CW < 200 & CV < 20 ).
+
+/* Comprobar espacio para grupo urgent */
++!check_space(urgent) : not any_urgent_shelf_free & not space_full(urgent) <-
+    +space_full(urgent);
+    .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
+    .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=urgent");
+    .send(scheduler, tell, no_space(urgent)).
+
+/* Si aun hay hueco urgente y estaba marcado como lleno, liberar */
++!check_space(urgent) : any_urgent_shelf_free & space_full(urgent) <-
+    -space_full(urgent);
+    .send(scheduler, tell, space_available(urgent)).
+
+/* Sin cambio de estado: nada que hacer */
++!check_space(urgent) <- true.
+
+/* Comprobar espacio para grupo nonurgent */
++!check_space(nonurgent) : not any_nonurgent_shelf_free & not space_full(nonurgent) <-
+    +space_full(nonurgent);
+    .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
+    .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=nonurgent");
+    .send(scheduler, tell, no_space(nonurgent)).
+
+/* Si aun hay hueco nonurgent y estaba marcado como lleno, liberar */
++!check_space(nonurgent) : any_nonurgent_shelf_free & space_full(nonurgent) <-
+    -space_full(nonurgent);
+    .send(scheduler, tell, space_available(nonurgent)).
+
+/* Sin cambio de estado: nada que hacer */
++!check_space(nonurgent) <- true.
+
+/* El scheduler informa del estado actual de cada estanteria para que el supervisor pueda evaluarlo */
++shelf_report(ShelfId, CW, CV)[source(_)] <-
+    -shelf_state(ShelfId, _, _);
+    +shelf_state(ShelfId, CW, CV).
+
+/* Cuando una tarea termina correctamente, actualizar el total completado y reevaluar espacio */
++task_done(CId, Robot)[source(scheduler)] <-
+    ?total_completados(N); -total_completados(N); +total_completados(N+1);
+    /* Pedir al scheduler el estado actualizado de las estanterias para reevaluar */
+    .send(scheduler, achieve, report_shelves);
+    !check_space(urgent);
+    !check_space(nonurgent).
+
++task_done(CId, Robot)[source(S)] : S \== scheduler <- true.
 
 /* Cuando se recibe un error, aumentar el contador e imprimir el detalle */
-+error_occurred(Robot, CId, Tipo)[source(_)] <-
++error_occurred(Robot, CId, Tipo)[source(scheduler)] <-
     ?total_errores(N); -total_errores(N); +total_errores(N+1);
     .print("[Supervisor] ERROR: ", Robot, " - ", Tipo, " - ", CId).
+
++error_occurred(Robot, CId, Tipo)[source(S)] : S \== scheduler <- true.
 
 
 /* ============================================================================
