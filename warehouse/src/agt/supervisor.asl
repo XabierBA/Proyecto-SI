@@ -94,6 +94,7 @@ shelf_state("shelf_9", 0, 0).
     .print("==========================================");
     .print("").
 
+
 /* ============================================================================
  * MENSAJES DEL SCHEDULER
  * ============================================================================ */
@@ -125,7 +126,6 @@ shelf_state("shelf_9", 0, 0).
 /* ============================================================================
  * DETECCION DE FALTA DE ESPACIO
  * ============================================================================ */
-
 
 /* Regla: una estanteria urgente tiene hueco si su capacidad no esta llena
  * (usamos un peso/volumen minimo simbolico de 1kg/1u para detectar si PODRIA caber algo) */

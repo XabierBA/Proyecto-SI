@@ -18,11 +18,3 @@ base(2,3).
 step_wait(300).            /* velocidad media */
 my_capacity(30, 1, 2).     /* peso, ancho, alto */
 default_shelf("shelf_5").
-
-
-
-/* Subasta: segunda prioridad */
-bid_delay(400).
-peer_bid_delay(robot_light,   0).
-peer_bid_delay(robot_heavy, 800).
-peer_bid_delay(robot_heavy_2, 900).

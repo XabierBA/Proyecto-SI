@@ -11,5 +11,5 @@ public enum CellType {
     SHELF,          // Estantería
     BLOCKED,        // Celda bloqueada
     ROBOT,           // Posición de un robot
-    EXIT            // Zona de salida de contenedores
+    EXIT             // Zona de salida de contenedores
 }

@@ -18,12 +18,3 @@ base(4,3).
 step_wait(500).            /* velocidad baja */
 my_capacity(100, 2, 3).    /* peso, ancho, alto */
 default_shelf("shelf_8").
-
-
-
-/* Subasta: cuarta prioridad — delay mayor que heavy_1
-   para que entre los dos pesados también haya orden determinista */
-bid_delay(900).
-peer_bid_delay(robot_light,   0).
-peer_bid_delay(robot_medium,  400).
-peer_bid_delay(robot_heavy, 800).
