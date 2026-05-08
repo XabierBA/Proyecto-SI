@@ -252,6 +252,11 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
 +!go(TX, TY) : position(MX, MY) & MY \== TY & walkable(MX+1, MY) <- !do_step(MX+1, MY, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY-1) <- !do_step(MX, MY-1, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY+1) <- !do_step(MX, MY+1, TX, TY).
+/* Escape: mover en cualquier dirección libre cuando el camino directo está bloqueado */
++!go(TX, TY) : position(MX, MY) & walkable(MX, MY-1) <- !do_step(MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & walkable(MX, MY+1) <- !do_step(MX, MY+1, TX, TY).
++!go(TX, TY) : position(MX, MY) & walkable(MX-1, MY) <- !do_step(MX-1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & walkable(MX+1, MY) <- !do_step(MX+1, MY, TX, TY).
 +!go(TX, TY) <- .wait(1000); !go(TX, TY).
 
 +!do_step(NX, NY, TX, TY) <-
@@ -287,6 +292,7 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
 +!return_step : base(BX,BY) & position(MX,MY) & MX > BX & walkable(MX-1, MY) <-
     ?step_wait(W); move_to(MX-1, MY); .wait(W); -+position(MX-1, MY).
 +!return_step <- .wait(300).
+-!return_step <- .wait(300).
 
 /* ============================================================================
  * ERRORES
