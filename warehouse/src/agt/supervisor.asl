@@ -1,15 +1,17 @@
 /*******************************************************************************
  * SUPERVISOR - Monitor Activo del Sistema
- * 
+ *
  * Universidad de Vigo - Sistemas Inteligentes
  * Curso 2025-2026
- * 
+ *
  * CAPACIDADES:
  *   - Seguimiento de contenedores recibidos por tipo
  *   - Conteo de tareas completadas
  *   - Registro y notificacion de errores
  *   - Generacion periodica de reportes del sistema
- * 
+ *   - Control de espacio disponible en estanterias
+ *   - Deteccion de falta de espacio y coordinacion con scheduler
+ *
  ******************************************************************************/
 
 /* ============================================================================
@@ -92,7 +94,6 @@ shelf_state("shelf_9", 0, 0).
     .print("==========================================");
     .print("").
 
-
 /* ============================================================================
  * MENSAJES DEL SCHEDULER
  * ============================================================================ */
@@ -120,55 +121,78 @@ shelf_state("shelf_9", 0, 0).
 
 +container_counted(CId, W, H, Weight, "urgent")[source(S)] : S \== scheduler <- true.
 
+
 /* ============================================================================
  * DETECCION DE FALTA DE ESPACIO
  * ============================================================================ */
 
-/* Definición de grupos según tus objetivos concretos */
-is_urgent_shelf(S) :- .member(S, ["shelf_1", "shelf_5", "shelf_8"]).
-is_nonurgent_shelf(S) :- .member(S, ["shelf_2", "shelf_3", "shelf_4", "shelf_6", "shelf_7", "shelf_9"]).
 
-/* Regla mejorada: no hay espacio si TODAS las estanterías del grupo están llenas */
-// Comprobamos si NO existe ninguna estantería del grupo que tenga hueco
+/* Regla: una estanteria urgente tiene hueco si su capacidad no esta llena
+ * (usamos un peso/volumen minimo simbolico de 1kg/1u para detectar si PODRIA caber algo) */
 any_urgent_shelf_free :-
-    is_urgent_shelf(S) & shelf_state(S, CW, CV) & 
-    ((S == "shelf_1" & CW < 50 & CV < 8) | 
-     (S == "shelf_5" & CW < 100 & CV < 12) | 
-     (S == "shelf_8" & CW < 200 & CV < 20)).
+    ( shelf_state("shelf_1", CW, CV) & CW < 50  & CV < 8  ) |
+    ( shelf_state("shelf_5", CW, CV) & CW < 100 & CV < 12 ) |
+    ( shelf_state("shelf_8", CW, CV) & CW < 200 & CV < 20 ).
 
 any_nonurgent_shelf_free :-
-    is_nonurgent_shelf(S) & shelf_state(S, CW, CV) & 
-    (( (S=="shelf_2" | S=="shelf_3" | S=="shelf_4") & CW < 50 & CV < 8) |
-     ( (S=="shelf_6" | S=="shelf_7") & CW < 100 & CV < 12) |
-     ( S=="shelf_9" & CW < 200 & CV < 20)).
+    ( shelf_state("shelf_2", CW, CV) & CW < 50  & CV < 8  ) |
+    ( shelf_state("shelf_3", CW, CV) & CW < 50  & CV < 8  ) |
+    ( shelf_state("shelf_4", CW, CV) & CW < 50  & CV < 8  ) |
+    ( shelf_state("shelf_6", CW, CV) & CW < 100 & CV < 12 ) |
+    ( shelf_state("shelf_7", CW, CV) & CW < 100 & CV < 12 ) |
+    ( shelf_state("shelf_9", CW, CV) & CW < 200 & CV < 20 ).
 
-/* Plan para detectar falta de espacio para URGENTES */
+/* Comprobar espacio para grupo urgent */
 +!check_space(urgent) : not any_urgent_shelf_free & not space_full(urgent) <-
     +space_full(urgent);
     .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
-    // LOG OBLIGATORIO
     .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=urgent");
-    // MENSAJE EXPLÍCITO AL SCHEDULER
     .send(scheduler, tell, no_space(urgent)).
 
-/* Plan para detectar falta de espacio para NO URGENTES (Standard/Fragile) */
+/* Si aun hay hueco urgente y estaba marcado como lleno, liberar */
++!check_space(urgent) : any_urgent_shelf_free & space_full(urgent) <-
+    -space_full(urgent);
+    .send(scheduler, tell, space_available(urgent)).
+
+/* Sin cambio de estado: nada que hacer */
++!check_space(urgent) <- true.
+
+/* Comprobar espacio para grupo nonurgent */
 +!check_space(nonurgent) : not any_nonurgent_shelf_free & not space_full(nonurgent) <-
     +space_full(nonurgent);
     .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
-    // LOG OBLIGATORIO
     .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=nonurgent");
-    // MENSAJE EXPLÍCITO AL SCHEDULER
     .send(scheduler, tell, no_space(nonurgent)).
 
-/* RESET: Si vuelve a haber espacio (cuando se vacíen las estanterías) */
-+!check_space(Group) : (Group == urgent & any_urgent_shelf_free & space_full(urgent)) |
-                      (Group == nonurgent & any_nonurgent_shelf_free & space_full(nonurgent)) <-
-    -space_full(Group);
-    .send(scheduler, untell, no_space(Group));
-    .print("[Supervisor] Espacio recuperado en grupo: ", Group).
+/* Si aun hay hueco nonurgent y estaba marcado como lleno, liberar */
++!check_space(nonurgent) : any_nonurgent_shelf_free & space_full(nonurgent) <-
+    -space_full(nonurgent);
+    .send(scheduler, tell, space_available(nonurgent)).
 
-/* Fallback: si no hay cambios, no hacer nada */
-+!check_space(_) <- true.
+/* Sin cambio de estado: nada que hacer */
++!check_space(nonurgent) <- true.
+
+/* El scheduler informa del estado actual de cada estanteria para que el supervisor pueda evaluarlo */
++shelf_report(ShelfId, CW, CV)[source(_)] <-
+    -shelf_state(ShelfId, _, _);
+    +shelf_state(ShelfId, CW, CV).
+
+/* Cuando una tarea termina correctamente, actualizar el total completado y reevaluar espacio */
++task_done(CId, Robot)[source(scheduler)] <-
+    ?total_completados(N); -total_completados(N); +total_completados(N+1);
+    /* Pedir al scheduler el estado actualizado de las estanterias para reevaluar */
+    .send(scheduler, achieve, report_shelves);
+    !check_space(urgent);
+    !check_space(nonurgent).
+
++task_done(CId, Robot)[source(S)] : S \== scheduler <- true.
+
+/* Cuando se recibe un error, aumentar el contador e imprimir el detalle */
++error_occurred(Robot, CId, Tipo)[source(scheduler)] <-
+    ?total_errores(N); -total_errores(N); +total_errores(N+1);
+    .print("[Supervisor] ERROR: ", Robot, " - ", Tipo, " - ", CId).
+
++error_occurred(Robot, CId, Tipo)[source(S)] : S \== scheduler <- true.
 
 
 /* ============================================================================

@@ -18,4 +18,11 @@ base(1,3).
 step_wait(150).            /* velocidad alta -> espera corta */
 my_capacity(10, 1, 1).     /* peso, ancho, alto */
 default_shelf("shelf_1").
-claim_priority(0).    
+
+
+
+/* Subasta: máxima prioridad, puja primero */
+bid_delay(0).
+peer_bid_delay(robot_medium,  400).
+peer_bid_delay(robot_heavy, 800).
+peer_bid_delay(robot_heavy_2, 900).

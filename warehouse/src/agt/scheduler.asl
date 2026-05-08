@@ -1,26 +1,17 @@
 /*******************************************************************************
- * SCHEDULER - Coordinador con Seleccion Inteligente de Estanteria
- * 
- * Universidad de Vigo - Sistemas Inteligentes
- * Curso 2025-2026
- * 
- * CAPACIDADES:
- *   - Clasificacion automatica de contenedores
- *   - Priorizacion de robots: light > medium > heavy
- *   - Seleccion de la estanteria mas pequena disponible
- *   - Seguimiento de estadisticas y gestion de errores
- * 
- ******************************************************************************/
-/*******************************************************************************
- * SCHEDULER - Coordinador para Robots Autónomos
- * Universidad de Vigo - Sistemas Inteligentes
+ * SCHEDULER - MODO AUTÓNOMO (MERGED)
+ * - Los robots eligen sus tareas (Pull) en lugar de recibirlas (Push).
+ * - Prioridad URGENTE gestionada por publicación.
+ * - Soporte para fases de salida y gestión de estanterías inteligente.
  ******************************************************************************/
 
-/* ============================================================================
-    ESTADO INICIAL Y CAPACIDADES
-   ============================================================================ */
+/* --- Capacidades de Robots (Para validaciones internas si fueran necesarias) --- */
+robot_capacity(robot_light,  10,  1, 1, 3).
+robot_capacity(robot_medium, 30,  1, 2, 2).
+robot_capacity(robot_heavy,  100, 2, 3, 1).
+robot_capacity(robot_heavy_2, 100, 2, 3, 1).
 
-/* Estanterías: shelf_data(Id, MaxWeight, MaxVolume, CurrentWeight, CurrentVolume) */
+/* --- Configuración de Estanterías --- */
 shelf_data("shelf_1", 50, 8, 0, 0).
 shelf_data("shelf_2", 50, 8, 0, 0).
 shelf_data("shelf_3", 50, 8, 0, 0).
@@ -31,7 +22,6 @@ shelf_data("shelf_7", 100, 12, 0, 0).
 shelf_data("shelf_8", 200, 20, 0, 0).
 shelf_data("shelf_9", 200, 20, 0, 0).
 
-/* Tipos permitidos por estantería */
 shelf_allows_type("shelf_1", "urgent").
 shelf_allows_type("shelf_5", "urgent").
 shelf_allows_type("shelf_8", "urgent").
@@ -52,105 +42,108 @@ shelf_fits(ShelfId, Weight, Area, Type) :-
 /* Estadísticas */
 stat_received(0). stat_completed(0). stat_errors(0).
 
-/* Estados de robot */
-robot_status(robot_light, idle). robot_status(robot_medium, idle). robot_status(robot_heavy, idle).
-
 !start.
-+!start <- .print("[Scheduler] Operativo en modo Autónomo").
 
-/* ============================================================================
-    DETECCIÓN Y PUBLICACIÓN (ÚNICO PLAN REVISADO)
-   ============================================================================ */
++!start : true <-
+    .print("[Scheduler] ⭐ MODO AUTÓNOMO OPERATIVO - Publicando para robots");
+    !main_loop.
 
-+new_container(CId) : not pending_container(CId, _, _, _, _) <-
+/* ========== CICLO DE REVISIÓN (Cada 500ms) ========== */
++!main_loop <-
+    .wait(500);
+    !check_and_broadcast;
+    !main_loop.
+
++!check_and_broadcast <-
+    !broadcast_urgents;
+    !broadcast_normals;
+    .abolish(skip(_)).
+
+/* Publicar Urgentes */
++!broadcast_urgents : pending(CId, W, H, Weight, "urgent") & not skip(CId) <-
+    .broadcast(tell, pending_container(CId, W, H, Weight, "urgent"));
+    +skip(CId);
+    !broadcast_urgents.
++!broadcast_urgents <- true.
+
+/* Publicar Normales */
++!broadcast_normals : pending(CId, W, H, Weight, Type) & Type \== "urgent" & not skip(CId) <-
+    .broadcast(tell, pending_container(CId, W, H, Weight, Type));
+    +skip(CId);
+    !broadcast_normals.
++!broadcast_normals <- true.
+
+/* Estado por tipo: accepting / blocked */
+accepting_type("urgent").
+accepting_type("standard").
+accepting_type("fragile").
+
+/* Recibir aviso del supervisor */
++no_storage_space(Type)[source(supervisor)] <-
+    -accepting_type(Type);
+    +blocked_type(Type);
+    .print("[Scheduler] Bloqueando nuevos contenedores de tipo: ", Type);
+    !trigger_exit_cycle(Type).
+
+/* Activar ciclo de salida */
++!trigger_exit_cycle(Type) <-
+    .print("[Scheduler] Iniciando ciclo de salida para tipo: ", Type);
+    for (pending(CId, _, _, _, Type)) {
+        .send(robot_light,   tell, exit_required(CId, Type));
+        .send(robot_medium,  tell, exit_required(CId, Type));
+        .send(robot_heavy,   tell, exit_required(CId, Type));
+        .send(robot_heavy_2, tell, exit_required(CId, Type))
+    }.
+
+/* Cuando el supervisor reporta que ya hay espacio, reanudar */
++storage_available(Type)[source(supervisor)] <-
+    -blocked_type(Type);
+    +accepting_type(Type);
+    .print("[Scheduler] Reanudando aceptación de tipo: ", Type).
+
+/* ========== RECEPCIÓN DE CONTENEDORES ========== */
++new_container(CId) : not pending(CId, _, _, _, _) <-
     ?stat_received(N); -stat_received(N); +stat_received(N+1);
     get_container_info(CId).
 
 +container_info(CId, W, H, Weight, Type) : true <-
     -container_info(CId, W, H, Weight, Type);
-    
+
     // Determinar grupo para fase de salida
     if (Type == "urgent") { Group = urgent; } else { Group = nonurgent; }
 
     if (output_phase(Group)) {
-        .print("[Scheduler] RECHAZADO por fase de salida: ", CId);
+        .print("[Scheduler] 🚫 RECHAZADO (Fase Salida): ", CId);
     } else {
-        .print("[Scheduler] PUBLICANDO: ", CId, " (", Type, ")");
-        // Esto es lo que el robot lee en su main_loop
-        .broadcast(tell, pending_container(CId, W, H, Weight, Type));
+        .print("[Scheduler] 📥 NUEVO: ", CId, " (", Type, ")");
+        +pending(CId, W, H, Weight, Type);
         .send(supervisor, tell, container_counted(CId, W, H, Weight, Type));
+        !check_and_broadcast;
     }.
-
-/* ============================================================================
-    GESTIÓN DE TAREAS COMPLETADAS
-   ============================================================================ */
 
 +task_complete(CId, Robot)[source(_)] : true <-
     ?stat_completed(NC); -stat_completed(NC); +stat_completed(NC+1);
-    
-    .print("[Scheduler] Tarea completada por ", Robot, ": ", CId);
+    .print("[✅ HECHO] ", Robot, " completó ", CId);
     .send(supervisor, tell, task_done(CId, Robot));
-    
-    // Actualizar estado del robot y limpiar el contenedor de la lista de pendientes
-    -robot_status(Robot, busy);
-    +robot_status(Robot, idle);
-    -pending_container(CId, _, _, _, _); 
+    -pending(CId, _, _, _, _);
+    .broadcast(untell, pending_container(CId, _, _, _, _)); // Limpiar de los demás robots
     -task_complete(CId, Robot)[source(_)].
 
-/* ============================================================================
-    BÚSQUEDA DE ESTANTERÍA (Para cuando el robot la pida)
-   ============================================================================ */
+/* ========== ERRORES Y REPORTES ========== */
++robot_error(Robot, CId, ErrorType)[source(_)] <-
+    .print("[⚠️ ERROR] ", Robot, " reporta: ", ErrorType);
+    ?stat_errors(N); -stat_errors(N); +stat_errors(N+1);
+    .send(supervisor, tell, error_occurred(Robot, CId, ErrorType));
+    -robot_error(Robot, CId, ErrorType)[source(_)].
 
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_1", Weight, W*H, Type) <- ShelfId = "shelf_1".
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_2", Weight, W*H, Type) <- ShelfId = "shelf_2".
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_3", Weight, W*H, Type) <- ShelfId = "shelf_3".
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_4", Weight, W*H, Type) <- ShelfId = "shelf_4".
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_5", Weight, W*H, Type) <- ShelfId = "shelf_5".
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_6", Weight, W*H, Type) <- ShelfId = "shelf_6".
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_7", Weight, W*H, Type) <- ShelfId = "shelf_7".
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_8", Weight, W*H, Type) <- ShelfId = "shelf_8".
-+!find_best_shelf(CId, W, H, Weight, Type, ShelfId)
-    : shelf_fits("shelf_9", Weight, W*H, Type) <- ShelfId = "shelf_9".
-
--!find_best_shelf(_, _, _, _, _, _) <- .print("[Scheduler] ERROR: No hay estantería válida").
-
-/* ============================================================================
-    FASES DE SALIDA (GESTIONADAS POR SUPERVISOR)
-   ============================================================================ */
-
-+no_space(Group)[source(supervisor)] : not output_phase(Group) <-
-    +output_phase(Group);
-    .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
-    .print("EVENT | time=", T, " | agent=scheduler | type=output_phase_started | data=", Group).
-
-+space_available(Group)[source(supervisor)] <-
-    -output_phase(Group);
-    .print("[Scheduler] Fase de salida finalizada para: ", Group).
-
-+!report_shelves <- 
++!report_shelves <-
     for ( shelf_data(ID, _, _, W, V) ) {
         .send(supervisor, tell, shelf_report(ID, W, V));
     }.
 
-/* ============================================================================
-    ERRORES Y ESTADO
-   ============================================================================ */
-
-+robot_error(Robot, CId, ErrorType)[source(_)] <-
-    .print("[Scheduler] Error reportado por ", Robot, ": ", ErrorType);
-    ?stat_errors(N); -stat_errors(N); +stat_errors(N+1);
-    .send(supervisor, tell, error_occurred(Robot, CId, ErrorType));
-    -robot_status(Robot, busy); +robot_status(Robot, idle);
-    -robot_error(Robot, CId, ErrorType)[source(_)].
++no_space(Group)[source(supervisor)] : not output_phase(Group) <- +output_phase(Group).
++space_available(Group)[source(supervisor)] <- -output_phase(Group).
 
 +!estado <-
     ?stat_received(R); ?stat_completed(C); ?stat_errors(E);
-    .print("[ESTADO] Recibidos:", R, " Completados:", C, " Errores:", E).
+    .print("[Estado] Recibidos:", R, " | Completados:", C, " | Errores:", E).
