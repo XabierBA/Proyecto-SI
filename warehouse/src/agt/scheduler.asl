@@ -78,7 +78,25 @@ accepting_type("urgent").
 accepting_type("standard").
 accepting_type("fragile").
 
-/* Recibir aviso del supervisor */
+/* Recibir aviso del supervisor (T0 = instante de recepción del no_space).
+ * Bloqueamos tipo, registramos T0 y arrancamos el ciclo de salida. */
++no_space(Group)[source(supervisor)] <-
+    !block_group(Group);
+    .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T0);
+    +t0(Group, T0);
+    +output_phase(Group);
+    .print("EVENT | time=", T0, " | agent=scheduler | type=output_phase_started | data=", Group);
+    !trigger_exit_cycle(Group).
+
+/* Bloquear los tipos de contenedor del grupo afectado */
++!block_group(urgent) <-
+    -accepting_type("urgent");
+    +blocked_type("urgent").
++!block_group(nonurgent) <-
+    -accepting_type("standard"); -accepting_type("fragile");
+    +blocked_type("standard"); +blocked_type("fragile").
+
+/* Compatibilidad con el handler anterior por si algún agente sigue mandando no_storage_space */
 +no_storage_space(Type)[source(supervisor)] <-
     -accepting_type(Type);
     +blocked_type(Type);
@@ -86,16 +104,34 @@ accepting_type("fragile").
     !trigger_exit_cycle(Type).
 
 /* Activar ciclo de salida */
-+!trigger_exit_cycle(Type) <-
-    .print("[Scheduler] Iniciando ciclo de salida para tipo: ", Type);
-    for (pending(CId, _, _, _, Type)) {
++!trigger_exit_cycle(Group) <-
+    .print("[Scheduler] Iniciando ciclo de salida para grupo: ", Group);
+    for (pending(CId, _, _, _, Type) & matches_group(Type, Group)) {
         .send(robot_light,   tell, exit_required(CId, Type));
         .send(robot_medium,  tell, exit_required(CId, Type));
         .send(robot_heavy,   tell, exit_required(CId, Type));
         .send(robot_heavy_2, tell, exit_required(CId, Type))
     }.
 
+/* Mapeo tipo → grupo */
+matches_group("urgent", urgent).
+matches_group("standard", nonurgent).
+matches_group("fragile", nonurgent).
+
 /* Cuando el supervisor reporta que ya hay espacio, reanudar */
++space_available(Group)[source(supervisor)] <-
+    !unblock_group(Group);
+    -output_phase(Group);
+    .print("[Scheduler] Reanudando aceptación de grupo: ", Group).
+
++!unblock_group(urgent) <-
+    -blocked_type("urgent");
+    +accepting_type("urgent").
++!unblock_group(nonurgent) <-
+    -blocked_type("standard"); -blocked_type("fragile");
+    +accepting_type("standard"); +accepting_type("fragile").
+
+/* Compatibilidad con storage_available antiguo */
 +storage_available(Type)[source(supervisor)] <-
     -blocked_type(Type);
     +accepting_type(Type);
