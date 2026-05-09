@@ -64,6 +64,13 @@ shelf_allows_type_local("shelf_9", "standard"). shelf_allows_type_local("shelf_9
 can_handle(W, H, Weight) :-
     my_capacity(MW, MWd, MHt) & Weight <= MW & W <= MWd & H <= MHt.
 
+/* Algún peer con menor bid_delay también puede cargar este paquete.
+ * Si no, no tiene sentido esperar — saltamos el delay para evitar inanición. */
+peer_competes(W, H, Weight) :-
+    bid_delay(MyD) & peer_bid_delay(Peer, PD) & PD < MyD &
+    peer_capacity(Peer, PMW, PMWd, PMHt) &
+    Weight <= PMW & W <= PMWd & H <= PMHt.
+
 shelf_fits_local(ShelfId, Weight, Area, Type) :-
     shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV) &
     shelf_allows_type_local(ShelfId, Type) &
@@ -81,12 +88,13 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     !main_loop.
 
 +!main_loop : state(idle) <-
+    .abolish(bid_attempted(_));
     !check_pending;
-    .wait(500);
+    .wait(100);
     !return_to_base_step;
     !main_loop.
 
-+!main_loop : state(busy) <- .wait(500); !main_loop.
++!main_loop : state(busy) <- .wait(200); !main_loop.
 
 /* Un paso hacia base si no hay paquete asignado y no estamos ya ahí */
 +!return_to_base_step : state(idle) & base(BX,BY) & not position(BX,BY) <-
@@ -106,36 +114,51 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
 +pending_container(CId, W, H, Weight, Type)[source(_)]
     : state(idle) & can_handle(W, H, Weight)
     & not claimed(CId) & not intending(CId) <-
-    ?bid_delay(D);
-    .wait(D);
     !bid_if_free(CId, W, H, Weight, Type).
 
 +pending_container(_, _, _, _, _) <- true.
 
-/* Búsqueda activa: urgentes primero, luego el resto */
+/* Búsqueda activa: urgentes primero, luego el resto.
+ * Procesamos TODOS los pending que podamos cargar en una pasada, marcando
+ * cada CId con bid_attempted para evitar reintentar el mismo en esta pasada
+ * si perdemos la subasta. Al finalizar limpiamos las marcas. */
 +!check_pending
-    : pending_container(CId, W, H, Weight, "urgent")
+    : state(idle) & pending_container(CId, W, H, Weight, "urgent")
     & can_handle(W, H, Weight)
-    & not claimed(CId) & not intending(CId) <-
-    !bid_if_free(CId, W, H, Weight, "urgent").
+    & not claimed(CId) & not intending(CId) & not bid_attempted(CId) <-
+    +bid_attempted(CId);
+    !bid_if_free(CId, W, H, Weight, "urgent");
+    !check_pending.
 +!check_pending
-    : pending_container(CId, W, H, Weight, Type)
+    : state(idle) & pending_container(CId, W, H, Weight, Type)
     & can_handle(W, H, Weight)
-    & not claimed(CId) & not intending(CId) <-
-    ?bid_delay(D);
-    .wait(D);
-    !bid_if_free(CId, W, H, Weight, Type).
-+!check_pending <- true.
+    & not claimed(CId) & not intending(CId) & not bid_attempted(CId) <-
+    +bid_attempted(CId);
+    !bid_if_free(CId, W, H, Weight, Type);
+    !check_pending.
++!check_pending <- .abolish(bid_attempted(_)).
 
-/* Pujar solo si el contenedor sigue libre */
+/* Pujar solo si el contenedor sigue libre.
+ * Marcamos intención INMEDIATAMENTE y broadcasteamos. Si algún peer con menor
+ * delay puede cargar el paquete, esperamos nuestro bid_delay como ventana de
+ * retirada; si no, pujamos sin esperar para evitar inanición. */
 +!bid_if_free(CId, W, H, Weight, Type)
-    : state(idle) & not claimed(CId) & not intending(CId) <-
+    : state(idle) & not claimed(CId) & not intending(CId) & peer_competes(W, H, Weight) <-
     .my_name(Me);
     +intending(CId);
     .print("[", Me, "] Pujando por ", CId);
     !broadcast_intend(CId, Me);
-    /* Ventana para recibir intenciones rivales */
-    .wait(200);
+    ?bid_delay(D);
+    .wait(D);
+    !resolve_bid(CId, W, H, Weight, Type).
+
++!bid_if_free(CId, W, H, Weight, Type)
+    : state(idle) & not claimed(CId) & not intending(CId) <-
+    .my_name(Me);
+    +intending(CId);
+    .print("[", Me, "] Pujando por ", CId, " (sin rivales capaces)");
+    !broadcast_intend(CId, Me);
+    .wait(100);
     !resolve_bid(CId, W, H, Weight, Type).
 
 +!bid_if_free(_, _, _, _, _) <- true.
@@ -184,8 +207,7 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
             +current_task_info(CId, W, H, Weight, Type);
             !find_shelf_nearest(CId, W, H, Weight, Type, ShelfId);
             +target_shelf(ShelfId);
-            Area = W*H;
-            !reserve_shelf(ShelfId, Weight, Area);
+            !reserve_shelf(ShelfId, Weight, W*H);
             .print("[", Me, "] Subasta ganada: ", CId, " -> ", ShelfId);
             !execute_task(CId, ShelfId)
         } else {
@@ -269,11 +291,17 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 +!pick_best_shelf([pair(D,S) | Rest], Best) <-
     !pick_best_acc(Rest, D, S, Best).
 
-/* Lista vacía: usar la estantería por defecto */
-+!pick_best_shelf([], Best) <-
-    ?default_shelf(Best);
+/* Lista vacía + default disponible: usar default */
++!pick_best_shelf([], Best) : default_shelf(D) & not shelf_blocked(D) <-
+    Best = D;
     .my_name(Me);
-    .print("[", Me, "] Sin candidatas, usando default: ", Best).
+    .print("[", Me, "] Sin candidatas, usando default: ", D).
+
+/* Lista vacía + default bloqueada/inexistente: fallar para que aborten arriba */
++!pick_best_shelf([], _) <-
+    .my_name(Me);
+    .print("[", Me, "] Sin candidatas y default no disponible — fallo");
+    .fail.
 
 +!pick_best_acc([], _, BestSoFar, BestSoFar).
 +!pick_best_acc([pair(D,S) | Rest], CurD, CurBest, Best)
@@ -309,6 +337,7 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 +!try_deliver_to_next(CId, W, H, Weight, Type) <-
     !find_shelf_alt_local(CId, W, H, Weight, Type, NewShelf);
     +target_shelf(NewShelf);
+    !reserve_shelf(NewShelf, Weight, W*H);
     .my_name(Me);
     .print("[", Me, "] Redirigido a: ", NewShelf);
     !get_shelf_dest(NewShelf, SX, SY);
@@ -321,6 +350,7 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .broadcast(untell, claimed(CId));
     -claimed(CId); -current_container(CId); -target_shelf(NewShelf);
     -current_task_info(CId, _, _, _, _);
+    -carrying(CId);
     .abolish(shelf_blocked(_));
     -+state(idle).
 
@@ -339,6 +369,7 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     -current_task_info(CId, _, _, _, _);
     -current_container(CId);
     -target_shelf(_);
+    -carrying(CId);
     .abolish(shelf_blocked(_));
     !go_home_busy.
 
@@ -355,20 +386,58 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
  * ============================================================================ */
 
 
-/* Reservar/liberar capacidad de una estantería (paquetes en tránsito) */
-+!reserve_shelf(ShelfId, Weight, AreaExpr) <-
-    A = AreaExpr + 0;
+/* Reservar/liberar capacidad de una estantería (paquetes en tránsito).
+ * Se sincroniza con los peers para que todos vean la misma vista de capacidad. */
++!reserve_shelf(ShelfId, Weight, Area) <-
+    .my_name(Me);
     ?shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV);
-    NW = UsedW + Weight; NV = UsedV + A;
+    NW = UsedW + Weight; NV = UsedV + Area;
     -shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV);
-    +shelf_local(ShelfId, MaxW, MaxV, NW, NV).
+    +shelf_local(ShelfId, MaxW, MaxV, NW, NV);
+    !notify_peers_reserve(Me, ShelfId, Weight, Area).
 
-+!release_shelf(ShelfId, Weight, AreaExpr) <-
-    A = AreaExpr + 0;
++!release_shelf(ShelfId, Weight, Area) <-
+    .my_name(Me);
     ?shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV);
-    NW = UsedW - Weight; NV = UsedV - A;
+    NW = UsedW - Weight; NV = UsedV - Area;
     -shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV);
-    +shelf_local(ShelfId, MaxW, MaxV, NW, NV).
+    +shelf_local(ShelfId, MaxW, MaxV, NW, NV);
+    !notify_peers_release(Me, ShelfId, Weight, Area).
+
++!notify_peers_reserve(Me, S, W, A) <-
+    !send_reserve(robot_light, Me, S, W, A);
+    !send_reserve(robot_medium, Me, S, W, A);
+    !send_reserve(robot_heavy, Me, S, W, A);
+    !send_reserve(robot_heavy_2, Me, S, W, A).
+
++!send_reserve(Peer, Me, S, W, A) : Peer \== Me <-
+    .send(Peer, tell, peer_reserved(S, W, A)).
++!send_reserve(_, _, _, _, _) <- true.
+
++!notify_peers_release(Me, S, W, A) <-
+    !send_release(robot_light, Me, S, W, A);
+    !send_release(robot_medium, Me, S, W, A);
+    !send_release(robot_heavy, Me, S, W, A);
+    !send_release(robot_heavy_2, Me, S, W, A).
+
++!send_release(Peer, Me, S, W, A) : Peer \== Me <-
+    .send(Peer, tell, peer_released(S, W, A)).
++!send_release(_, _, _, _, _) <- true.
+
+/* Sincronización de reservas/liberaciones recibidas de peers */
++peer_reserved(ShelfId, Weight, Area)[source(_)] <-
+    ?shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV);
+    NW = UsedW + Weight; NV = UsedV + Area;
+    -shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV);
+    +shelf_local(ShelfId, MaxW, MaxV, NW, NV);
+    -peer_reserved(ShelfId, Weight, Area)[source(_)].
+
++peer_released(ShelfId, Weight, Area)[source(_)] <-
+    ?shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV);
+    NW = UsedW - Weight; NV = UsedV - Area;
+    -shelf_local(ShelfId, MaxW, MaxV, UsedW, UsedV);
+    +shelf_local(ShelfId, MaxW, MaxV, NW, NV);
+    -peer_released(ShelfId, Weight, Area)[source(_)].
 
 /* Actualizar capacidad usada de una estantería tras entregar */
 +!update_shelf_used(ShelfId, Weight, Area) <- true. /* reserva ya hecha al reclamar */
@@ -379,6 +448,7 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     ?container_at(CId, CX, CY);
     !go_adjacent(CX, CY);
     pickup(CId);
+    +carrying(CId);
     .wait(100);
     !get_shelf_dest(ShelfId, SX, SY);
     !go(SX, SY);
@@ -392,6 +462,7 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .broadcast(untell, claimed(CId));
     -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
     -current_task_info(CId, _, _, _, _);
+    -carrying(CId);
     .abolish(shelf_blocked(_));
     -+state(idle).
 
@@ -409,6 +480,7 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .broadcast(untell, claimed(CId));
     -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
     -current_task_info(CId, _, _, _, _);
+    -carrying(CId);
     .abolish(shelf_blocked(_));
     -+state(idle).
 
@@ -485,12 +557,13 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .broadcast(untell, claimed(CId));
     -claimed(CId); -current_container(CId); -target_shelf(Sh); -+state(idle).
 
-/* Estantería llena: marcarla y buscar la siguiente */
+/* Estantería llena: liberar reserva local, marcarla y buscar la siguiente */
 +error(shelf_full, _)
     : state(busy) & current_container(CId) & target_shelf(FullShelf)
     & current_task_info(CId, W, H, Weight, Type) <-
     .my_name(Me);
     .print("[", Me, "] Estantería llena: ", FullShelf, " - probando siguiente");
+    !release_shelf(FullShelf, Weight, W*H);
     +shelf_blocked(FullShelf);
     -target_shelf(FullShelf);
     !try_deliver_to_next(CId, W, H, Weight, Type).
