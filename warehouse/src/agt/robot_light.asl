@@ -26,3 +26,8 @@ bid_delay(0).
 peer_bid_delay(robot_medium,  400).
 peer_bid_delay(robot_heavy, 800).
 peer_bid_delay(robot_heavy_2, 900).
+
+/* Capacidades de los peers (peso, ancho, alto) - para evitar esperas innecesarias */
+peer_capacity(robot_medium,  30, 1, 2).
+peer_capacity(robot_heavy,  100, 2, 3).
+peer_capacity(robot_heavy_2,100, 2, 3).

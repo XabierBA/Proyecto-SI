@@ -27,3 +27,7 @@ bid_delay(900).
 peer_bid_delay(robot_light,   0).
 peer_bid_delay(robot_medium,  400).
 peer_bid_delay(robot_heavy, 800).
+
+peer_capacity(robot_light,   10, 1, 1).
+peer_capacity(robot_medium,  30, 1, 2).
+peer_capacity(robot_heavy,  100, 2, 3).
