@@ -101,6 +101,9 @@ accepting_type("fragile").
     +accepting_type(Type);
     .print("[Scheduler] Reanudando aceptación de tipo: ", Type).
 
+
+    
+
 /* ========== RECEPCIÓN DE CONTENEDORES ========== */
 +new_container(CId) : not pending(CId, _, _, _, _) <-
     ?stat_received(N); -stat_received(N); +stat_received(N+1);
@@ -120,30 +123,3 @@ accepting_type("fragile").
         .send(supervisor, tell, container_counted(CId, W, H, Weight, Type));
         !check_and_broadcast;
     }.
-
-+task_complete(CId, Robot)[source(_)] : true <-
-    ?stat_completed(NC); -stat_completed(NC); +stat_completed(NC+1);
-    .print("[✅ HECHO] ", Robot, " completó ", CId);
-    .send(supervisor, tell, task_done(CId, Robot));
-    -pending(CId, _, _, _, _);
-    .broadcast(untell, pending_container(CId, _, _, _, _)); // Limpiar de los demás robots
-    -task_complete(CId, Robot)[source(_)].
-
-/* ========== ERRORES Y REPORTES ========== */
-+robot_error(Robot, CId, ErrorType)[source(_)] <-
-    .print("[⚠️ ERROR] ", Robot, " reporta: ", ErrorType);
-    ?stat_errors(N); -stat_errors(N); +stat_errors(N+1);
-    .send(supervisor, tell, error_occurred(Robot, CId, ErrorType));
-    -robot_error(Robot, CId, ErrorType)[source(_)].
-
-+!report_shelves <-
-    for ( shelf_data(ID, _, _, W, V) ) {
-        .send(supervisor, tell, shelf_report(ID, W, V));
-    }.
-
-+no_space(Group)[source(supervisor)] : not output_phase(Group) <- +output_phase(Group).
-+space_available(Group)[source(supervisor)] <- -output_phase(Group).
-
-+!estado <-
-    ?stat_received(R); ?stat_completed(C); ?stat_errors(E);
-    .print("[Estado] Recibidos:", R, " | Completados:", C, " | Errores:", E).

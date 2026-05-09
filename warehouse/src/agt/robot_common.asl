@@ -159,18 +159,18 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
 
 +intend(_, _) <- true.
 
-/* Resolver subasta: chequeo activo de rivales + reclamar si sigo ganando */
 +!resolve_bid(CId, W, H, Weight, Type) : intending(CId) & state(idle) & not claimed(CId) <-
     .my_name(Me);
     ?bid_delay(MyD);
     !check_rivals(CId, Me, MyD);
     if (intending(CId)) {
         +claimed(CId);
-        .broadcast(tell, claimed(CId));    /* aviso a todos: este contenedor ya tiene dueño */
+        .broadcast(tell, claimed(CId));
         -intending(CId);
         -+state(busy);
         -+returning(no);
         +current_container(CId);
+        +current_task_info(CId, W, H, Weight, Type);
         !find_shelf_local(CId, W, H, Weight, Type, ShelfId);
         +target_shelf(ShelfId);
         .print("[", Me, "] Subasta ganada: ", CId, " -> ", ShelfId);
@@ -179,7 +179,6 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
 
 +!resolve_bid(CId, _, _, _, _) <-
     -intending(CId).
-
 /* Chequeo activo: retirarse si hay un rival con menor delay en el BB */
 +!check_rivals(CId, Me, MyD)
     : intend(CId, Rival) & peer_bid_delay(Rival, RD) & RD < MyD <-
@@ -207,6 +206,81 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     .my_name(Me);
     .print("[", Me, "] Usando estantería default para ", CId, ": ", D).
 
+
+
+    /* ============================================================================
+ * SELECCIÓN ALTERNATIVA — excluye estanterías marcadas como llenas
+ * ============================================================================ */
+
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_1")
+    : not shelf_blocked("shelf_1") & shelf_fits_local("shelf_1", Weight, W*H, Type).
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_2")
+    : not shelf_blocked("shelf_2") & shelf_fits_local("shelf_2", Weight, W*H, Type).
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_3")
+    : not shelf_blocked("shelf_3") & shelf_fits_local("shelf_3", Weight, W*H, Type).
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_4")
+    : not shelf_blocked("shelf_4") & shelf_fits_local("shelf_4", Weight, W*H, Type).
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_5")
+    : not shelf_blocked("shelf_5") & shelf_fits_local("shelf_5", Weight, W*H, Type).
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_6")
+    : not shelf_blocked("shelf_6") & shelf_fits_local("shelf_6", Weight, W*H, Type).
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_7")
+    : not shelf_blocked("shelf_7") & shelf_fits_local("shelf_7", Weight, W*H, Type).
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_8")
+    : not shelf_blocked("shelf_8") & shelf_fits_local("shelf_8", Weight, W*H, Type).
++!find_shelf_alt_local(_, W, H, Weight, Type, "shelf_9")
+    : not shelf_blocked("shelf_9") & shelf_fits_local("shelf_9", Weight, W*H, Type).
+
+-!find_shelf_alt_local(CId, _, _, _, _, _) <-
+    .my_name(Me);
+    .print("[", Me, "] Todas las estanterías compatibles agotadas para ", CId).
+
+
+/* ============================================================================
+ * ENTREGA A ESTANTERÍA ALTERNATIVA — el robot ya lleva el paquete, sin pickup
+ * ============================================================================ */
+
++!try_deliver_to_next(CId, W, H, Weight, Type) <-
+    !find_shelf_alt_local(CId, W, H, Weight, Type, NewShelf);
+    +target_shelf(NewShelf);
+    .my_name(Me);
+    .print("[", Me, "] Redirigido a: ", NewShelf);
+    !get_shelf_dest(NewShelf, SX, SY);
+    !go(SX, SY);
+    drop_at(NewShelf);
+    .wait(100);
+    .send(scheduler, tell, task_complete(CId, Me));
+    .print("[", Me, "] COMPLETO (reasignado): ", CId, " -> ", NewShelf);
+    .broadcast(untell, claimed(CId));
+    -claimed(CId); -current_container(CId); -target_shelf(NewShelf);
+    -current_task_info(CId, _, _, _, _);
+    .abolish(shelf_blocked(_));
+    -+state(idle).
+
+/* drop_at falló en la nueva estantería → +error(shelf_full,_) lo gestionará */
+-!try_deliver_to_next(CId, _, _, _, _) : error(shelf_full, _) & target_shelf(_) <- true.
+
+/* find_shelf_alt_local falló (todas agotadas) → abortar y volver a base */
+-!try_deliver_to_next(CId, _, _, _, _) <-
+    .my_name(Me);
+    .print("[", Me, "] Sin más estanterías para ", CId, " - abortando");
+    .send(scheduler, tell, robot_error(Me, CId, no_shelf_available));
+    .broadcast(untell, claimed(CId));
+    -claimed(CId);
+    -current_task_info(CId, _, _, _, _);
+    -current_container(CId);
+    -target_shelf(_);
+    .abolish(shelf_blocked(_));
+    !go_home_busy.
+
+/* Navegar a base manteniéndose busy (zonas accesibles), idle solo al llegar */
++!go_home_busy <-
+    ?base(BX, BY);
+    .my_name(Me);
+    .print("[", Me, "] Volviendo a base (sin paquete)");
+    !go(BX, BY);
+    -+state(idle);
+    .print("[", Me, "] En base, listo").
 /* ============================================================================
  * EJECUCIÓN DE TAREAS Y NAVEGACIÓN
  * ============================================================================ */
@@ -229,12 +303,18 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
     -+state(idle).
 
+/* Si la causa es shelf_full: no limpiar nada, el handler de error lo gestiona */
+-!execute_task(CId, ShelfId) : error(shelf_full, _) <- true.
+
+/* Cualquier otro fallo: limpieza normal */
 -!execute_task(CId, ShelfId) <-
     .my_name(Me);
     .print("[", Me, "] FALLO tarea ", CId);
     .send(scheduler, tell, robot_error(Me, CId, execution_failed));
     .broadcast(untell, claimed(CId));
     -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    .abolish(shelf_blocked(_));
     -+state(idle).
 
 +!go_adjacent(CX, CY) : walkable(CX, CY+1) <- !go(CX, CY+1).
@@ -310,11 +390,18 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     .broadcast(untell, claimed(CId));
     -claimed(CId); -current_container(CId); -target_shelf(Sh); -+state(idle).
 
-+error(shelf_full, _) : state(busy) <-
-    .my_name(Me); ?current_container(CId); ?target_shelf(Sh);
-    .send(scheduler, tell, robot_error(Me, CId, shelf_full));
-    .broadcast(untell, claimed(CId));
-    -claimed(CId); -current_container(CId); -target_shelf(Sh); -+state(idle).
+/* Estantería llena: marcarla y buscar la siguiente */
++error(shelf_full, _)
+    : state(busy) & current_container(CId) & target_shelf(FullShelf)
+    & current_task_info(CId, W, H, Weight, Type) <-
+    .my_name(Me);
+    .print("[", Me, "] Estantería llena: ", FullShelf, " - probando siguiente");
+    +shelf_blocked(FullShelf);
+    -target_shelf(FullShelf);
+    !try_deliver_to_next(CId, W, H, Weight, Type).
+
+/* Guardia de seguridad: si no hay target_shelf en BB, ignorar sin disparar handler genérico */
++error(shelf_full, _) <- true.
 
 +error(too_far, _)           : state(busy) <- .wait(300); ?current_container(CId); ?target_shelf(Sh); !execute_task(CId, Sh).
 +error(conflict, _)          <- true.
@@ -333,4 +420,4 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
 +!get_shelf_dest("shelf_9", 14, 9).
 +!get_shelf_dest(_, X, Y) : default_shelf(D) <- !get_shelf_dest(D, X, Y).
 
-+robot_at(X,Y) <- -+position(X,Y).
++robot_at(X,Y) <- -+position(X,Y).  
