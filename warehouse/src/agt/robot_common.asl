@@ -96,9 +96,13 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
 
 +!main_loop : state(busy) <- .wait(200); !main_loop.
 
-/* Un paso hacia base si no hay paquete asignado y no estamos ya ahí */
-+!return_to_base_step : state(idle) & base(BX,BY) & not position(BX,BY) <-
-    !return_step.
+/* Volver a base paso a paso. En cada paso comprueba si está idle y no en base.
+ * Si llega un pending compatible, check_pending lo cogerá en la siguiente iter
+ * del main_loop (este loop se interrumpe al cambiar a busy). */
++!return_to_base_step
+    : state(idle) & base(BX,BY) & not position(BX,BY) <-
+    !return_step;
+    !return_to_base_step.
 +!return_to_base_step <- true.
 
 /* ============================================================================
@@ -348,6 +352,8 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .send(scheduler, tell, task_complete(CId, Me));
     .print("[", Me, "] COMPLETO (reasignado): ", CId, " -> ", NewShelf);
     .broadcast(untell, claimed(CId));
+    .broadcast(untell, pending_container(CId, W, H, Weight, Type));
+    -pending_container(CId, _, _, _, _);
     -claimed(CId); -current_container(CId); -target_shelf(NewShelf);
     -current_task_info(CId, _, _, _, _);
     -carrying(CId);
@@ -454,12 +460,14 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     !go(SX, SY);
     drop_at(ShelfId);
     .wait(100);
-    ?current_task_info(CId, W, H, Weight, _);
+    ?current_task_info(CId, W, H, Weight, Type);
     !update_shelf_used(ShelfId, Weight, W*H);
     .my_name(Me);
     .send(scheduler, tell, task_complete(CId, Me));
     .print("[", Me, "] ", CId, " -> ", ShelfId, " OK");
     .broadcast(untell, claimed(CId));
+    .broadcast(untell, pending_container(CId, W, H, Weight, Type));
+    -pending_container(CId, _, _, _, _);
     -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
     -current_task_info(CId, _, _, _, _);
     -carrying(CId);
