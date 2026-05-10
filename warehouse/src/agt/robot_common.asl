@@ -952,7 +952,8 @@ type_in_active_deadline(Type) :-
     .wait(100);
     Area = W*H; !release_shelf(ShelfId, Weight, Area);
     -stored_at(CId, ShelfId, _, _, _, _);
-    .broadcast(untell, stored_at(CId, ShelfId, W, H, Weight, Type));
+    /* NO broadcast untell stored_at: la unificación exacta de variables puede
+     * fallar en peers. La limpieza en peers se hace exclusivamente via exit_done. */
     +carrying_exit(CId);
     /* Cada robot deposita SIEMPRE en su celda fija asignada. Sin búsqueda
      * dinámica: un robot, una celda, siempre. Esto elimina cualquier

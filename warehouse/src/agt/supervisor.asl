@@ -141,8 +141,9 @@ any_nonurgent_shelf_free :-
     ( shelf_state("shelf_9", CW, CV) & 200 - CW >= 5 & 20 - CV >= 1 ).
 
 /* Comprobar espacio para grupo urgent: dispara si NINGUNA tiene hueco
- * y no estamos ya en ciclo de salida para urgent */
-+!check_space(urgent) : not any_urgent_shelf_free & not space_full(urgent) & not cycle_active(urgent) <-
+ * y no hemos reportado ese problema ya (space_full actúa como guard).
+ * NO usamos cycle_active aquí; solo space_full evita redisparo. */
++!check_space(urgent) : not any_urgent_shelf_free & not space_full(urgent) <-
     +space_full(urgent);
     +cycle_active(urgent);
     .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
@@ -150,13 +151,15 @@ any_nonurgent_shelf_free :-
     .send(scheduler, tell, no_space(urgent)).
 
 +!check_space(urgent) : any_urgent_shelf_free & space_full(urgent) <-
-    -space_full(urgent).
+    -space_full(urgent);
+    -cycle_active(urgent).
 
 +!check_space(urgent) <- true.
 
 /* Comprobar espacio para grupo nonurgent: dispara si NINGUNA tiene hueco
- * y no estamos ya en ciclo de salida para nonurgent */
-+!check_space(nonurgent) : not any_nonurgent_shelf_free & not space_full(nonurgent) & not cycle_active(nonurgent) <-
+ * y no hemos reportado ese problema ya (space_full actúa como guard).
+ * NO usamos cycle_active aquí; solo space_full evita redisparo. */
++!check_space(nonurgent) : not any_nonurgent_shelf_free & not space_full(nonurgent) <-
     +space_full(nonurgent);
     +cycle_active(nonurgent);
     .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
@@ -164,14 +167,15 @@ any_nonurgent_shelf_free :-
     .send(scheduler, tell, no_space(nonurgent)).
 
 +!check_space(nonurgent) : any_nonurgent_shelf_free & space_full(nonurgent) <-
-    -space_full(nonurgent).
+    -space_full(nonurgent);
+    -cycle_active(nonurgent).
 
 +!check_space(nonurgent) <- true.
 
-/* El scheduler nos avisa cuando terminó un ciclo de salida; reseteamos guard */
+/* El scheduler nos avisa cuando terminó un ciclo de salida.
+ * Ya no limpiaremos cycle_active aquí; se limpia solo en check_space cuando hay espacio.
+ * Solo eliminamos el mensaje para no acumular beliefs. */
 +cycle_finished(Group)[source(scheduler)] <-
-    -cycle_active(Group);
-    -space_full(Group);
     -cycle_finished(Group)[source(scheduler)].
 
 /* El robot informa del estado actual de cada estanteria tras reservar/liberar */
