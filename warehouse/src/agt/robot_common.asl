@@ -40,6 +40,15 @@ is_entry_zone(X,Y) :- X >= 5 & X <= 7 & Y >= 0 & Y <= 1.
 /* --- Colisiones y tránsito --- */
 blocked(X,Y) :- shelf_cell(X,Y).
 blocked(X,Y) :- X < 0 | X >= 20 | Y < 0 | Y >= 15.
+/* Bases de los otros robots: bloqueadas durante la fase de salida (current_exit
+ * activo). Cada robot tiene su base; las celdas de las otras 3 bases se
+ * tratan como obstáculos para evitar atascos cuando un peer está parado en
+ * su base. La base propia siempre es accesible para que la vuelta funcione.
+ * Las bases están en (1,3), (2,3), (3,3), (4,3). */
+blocked(1,3) :- current_exit(_) & not base(1,3).
+blocked(2,3) :- current_exit(_) & not base(2,3).
+blocked(3,3) :- current_exit(_) & not base(3,3).
+blocked(4,3) :- current_exit(_) & not base(4,3).
 /* Y=0 e Y=1 bloqueados, salvo zona de salida cuando ejecutamos tarea de salida.
  * Importante: durante una tarea de entrada, la zona de salida también está
  * bloqueada (sería una "trampa" porque desde X=2,Y=1 no se puede ir a X=3,Y=1). */
@@ -53,7 +62,13 @@ blocked(X,Y) :- is_class_zone(X,Y).
 
 container_blocked(X,Y) :- container_at(_, X, Y).
 peer_blocks(X,Y) :- peer_position(_, X, Y).
-walkable(X,Y) :- not blocked(X,Y) & not container_blocked(X,Y) & not peer_blocks(X,Y).
+/* Durante la fase de salida (current_exit activo) ignoramos peer_blocks:
+ * los robots siguen su ruta directa y si hay choque, error(conflict, _)
+ * dispara reintento sin recalcular rutas alternativas. Esto evita la
+ * oscilación que se produce cuando un peer estático bloquea una celda
+ * intermedia y peer_blocks fuerza al robot a buscar caminos absurdos. */
+walkable(X,Y) :- current_exit(_) & not blocked(X,Y) & not container_blocked(X,Y).
+walkable(X,Y) :- not current_exit(_) & not blocked(X,Y) & not container_blocked(X,Y) & not peer_blocks(X,Y).
 
 /* --- Configuración local de estanterías --- */
 /* shelf_local(Id, MaxW, MaxV, UsedW, UsedV) */
@@ -105,11 +120,17 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     .broadcast(tell, peer_at_pos(Me, IX, IY));
     !main_loop.
 
-/* Durante deadline activo: sólo ciclo de salida, sin aceptar nuevas entradas */
-+!main_loop : state(idle) & deadline_active(_) <-
+/* Durante deadline activo con tarea pendiente: ciclo de salida + un paso de retorno */
++!main_loop : state(idle) & deadline_active(_) & has_exit_work <-
     .abolish(bid_attempted(_));
     !check_exit_pending;
     .wait(100);
+    !return_step;
+    !main_loop.
+
+/* Durante deadline activo SIN trabajo: esperar en base sin moverse */
++!main_loop : state(idle) & deadline_active(_) <-
+    .wait(200);
     !main_loop.
 
 /* Sin deadline: ciclo normal de entrada y retorno a base */
@@ -121,6 +142,14 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     !main_loop.
 
 +!main_loop : state(busy) <- .wait(200); !main_loop.
+
+/* Regla lógica (creencia derivada): hay trabajo de salida pendiente para este robot.
+ * Se usa en el contexto del main_loop — no puede ser un plan (!). */
+has_exit_work :-
+    deadline_active(urgent) & stored_at(CId, _, _, _, _, "urgent") & not claimed_exit(CId).
+has_exit_work :-
+    deadline_active(nonurgent) & stored_at(CId, _, _, _, _, Type)
+    & (Type == "standard" | Type == "fragile") & not claimed_exit(CId).
 
 /* Volver a base paso a paso. En cada paso comprueba si está idle y no en base.
  * Si llega un pending compatible, check_pending lo cogerá en la siguiente iter
@@ -135,9 +164,11 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
  * SUBASTA DISTRIBUIDA ENTRE PEERS
  * ============================================================================ */
 
-/* Reacción a anuncio: urgentes con delay 0 adicional, resto con delay normal */
+/* Reacción a anuncio: urgentes con delay 0 adicional, resto con delay normal.
+ * Ignoramos pending_container durante un deadline activo: el robot solo
+ * debe atender al ciclo de salida hasta que el deadline termine. */
 +pending_container(CId, W, H, Weight, "urgent")[source(_)]
-    : state(idle) & can_handle(W, H, Weight)
+    : state(idle) & not deadline_active(_) & can_handle(W, H, Weight)
     & not claimed(CId) & not intending(CId)
     & not no_shelf_available(CId) <-
     !bid_if_free(CId, W, H, Weight, "urgent").
@@ -146,7 +177,7 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
  * recogido el paquete actual, marcamos flag de preempción. execute_task lo
  * detectará en su siguiente paso y abortará voluntariamente. */
 +pending_container(CId, W, H, Weight, "urgent")[source(_)]
-    : state(busy) & can_handle(W, H, Weight)
+    : state(busy) & not deadline_active(_) & can_handle(W, H, Weight)
     & not claimed(CId) & not intending(CId)
     & current_container(OldCId) & not carrying(OldCId)
     & current_task_info(OldCId, _, _, _, OldType) & OldType \== "urgent"
@@ -157,7 +188,7 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     +preempt_pending(CId).
 
 +pending_container(CId, W, H, Weight, Type)[source(_)]
-    : state(idle) & can_handle(W, H, Weight)
+    : state(idle) & not deadline_active(_) & can_handle(W, H, Weight)
     & not claimed(CId) & not intending(CId)
     & not no_shelf_available(CId) <-
     !bid_if_free(CId, W, H, Weight, Type).
@@ -180,7 +211,7 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
  * cada CId con bid_attempted para evitar reintentar el mismo en esta pasada
  * si perdemos la subasta. Al finalizar limpiamos las marcas. */
 +!check_pending
-    : state(idle) & pending_container(CId, W, H, Weight, "urgent")
+    : state(idle) & not deadline_active(_) & pending_container(CId, W, H, Weight, "urgent")
     & can_handle(W, H, Weight)
     & not claimed(CId) & not intending(CId) & not bid_attempted(CId)
     & not no_shelf_available(CId) <-
@@ -188,7 +219,7 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     !bid_if_free(CId, W, H, Weight, "urgent");
     !check_pending.
 +!check_pending
-    : state(idle) & pending_container(CId, W, H, Weight, Type)
+    : state(idle) & not deadline_active(_) & pending_container(CId, W, H, Weight, Type)
     & can_handle(W, H, Weight)
     & not claimed(CId) & not intending(CId) & not bid_attempted(CId)
     & not no_shelf_available(CId) <-
@@ -200,9 +231,10 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
 /* Pujar solo si el contenedor sigue libre.
  * Marcamos intención INMEDIATAMENTE y broadcasteamos. Si algún peer con menor
  * delay puede cargar el paquete, esperamos nuestro bid_delay como ventana de
- * retirada; si no, pujamos sin esperar para evitar inanición. */
+ * retirada; si no, pujamos sin esperar para evitar inanición.
+ * Doble protección: si llega deadline mientras evaluamos, no pujamos. */
 +!bid_if_free(CId, W, H, Weight, Type)
-    : state(idle) & not claimed(CId) & not intending(CId) & peer_competes(W, H, Weight) <-
+    : state(idle) & not deadline_active(_) & not claimed(CId) & not intending(CId) & peer_competes(W, H, Weight) <-
     .my_name(Me);
     +intending(CId);
     .print("[", Me, "] Pujando por ", CId);
@@ -212,7 +244,7 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     !resolve_bid(CId, W, H, Weight, Type).
 
 +!bid_if_free(CId, W, H, Weight, Type)
-    : state(idle) & not claimed(CId) & not intending(CId) <-
+    : state(idle) & not deadline_active(_) & not claimed(CId) & not intending(CId) <-
     .my_name(Me);
     +intending(CId);
     .print("[", Me, "] Pujando por ", CId, " (sin rivales capaces)");
@@ -627,60 +659,42 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 +!go_adjacent(CX, CY) : walkable(CX, CY-1) <- !go(CX, CY-1).
 +!go_adjacent(CX, CY) <- .wait(500); !go_adjacent(CX, CY).
 
-+!go(TX, TY) : position(TX, TY) <- true.
-+!go(TX, TY) : position(MX, MY) & MY < TY & walkable(MX, MY+1) <- !do_step(MX, MY+1, TX, TY).
-+!go(TX, TY) : position(MX, MY) & MY > TY & walkable(MX, MY-1) <- !do_step(MX, MY-1, TX, TY).
-+!go(TX, TY) : position(MX, MY) & MX < TX & walkable(MX+1, MY) <- !do_step(MX+1, MY, TX, TY).
-+!go(TX, TY) : position(MX, MY) & MX > TX & walkable(MX-1, MY) <- !do_step(MX-1, MY, TX, TY).
-+!go(TX, TY) : position(MX, MY) & MY \== TY & walkable(MX-1, MY) <- !do_step(MX-1, MY, TX, TY).
-+!go(TX, TY) : position(MX, MY) & MY \== TY & walkable(MX+1, MY) <- !do_step(MX+1, MY, TX, TY).
-+!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY-1) <- !do_step(MX, MY-1, TX, TY).
-+!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY+1) <- !do_step(MX, MY+1, TX, TY).
-/* Sin reglas de escape ciegas: si todas las direcciones útiles están bloqueadas,
- * esperar 1s y reintentar. peer_blocks se actualiza tras cada movimiento,
- * por lo que cuando el peer libera la celda el robot avanzará. Las reglas
- * de escape antiguas permitían retroceder hacia el origen, generando
- * oscilación infinita entre dos celdas adyacentes. */
-+!go(TX, TY) <- .wait(1000); !go(TX, TY).
+/* Anti-oscilación: last_pos registra la celda de origen antes de cada paso.
+ * Las reglas excluyen last_pos como destino inmediato, evitando A->B->A.
+ * Fallback: si todo está bloqueado o apunta a last_pos, borrar y esperar 1s. */
++!go(TX, TY) : position(TX, TY) <- .abolish(last_pos(_,_)).
++!go(TX, TY) : position(MX, MY) & MY < TY & walkable(MX, MY+1) & not last_pos(MX, MY+1) <- !do_step(MX, MY, MX, MY+1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY > TY & walkable(MX, MY-1) & not last_pos(MX, MY-1) <- !do_step(MX, MY, MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX < TX & walkable(MX+1, MY) & not last_pos(MX+1, MY) <- !do_step(MX, MY, MX+1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX > TX & walkable(MX-1, MY) & not last_pos(MX-1, MY) <- !do_step(MX, MY, MX-1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY \== TY & walkable(MX-1, MY) & not last_pos(MX-1, MY) <- !do_step(MX, MY, MX-1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MY \== TY & walkable(MX+1, MY) & not last_pos(MX+1, MY) <- !do_step(MX, MY, MX+1, MY, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY-1) & not last_pos(MX, MY-1) <- !do_step(MX, MY, MX, MY-1, TX, TY).
++!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY+1) & not last_pos(MX, MY+1) <- !do_step(MX, MY, MX, MY+1, TX, TY).
++!go(TX, TY) <- .abolish(last_pos(_,_)); .wait(1000); !go(TX, TY).
 
-/* IMPORTANTE: no actualizamos position(NX,NY) localmente. Dejamos que el
- * entorno emita robot_at(NX,NY) tras un move exitoso; el handler +robot_at
- * hará -+position(X,Y). Si move_to falla, position queda inalterada y la
- * próxima iteración de !go reevaluará desde la posición real. */
-+!do_step(NX, NY, TX, TY) <-
++!do_step(FX, FY, NX, NY, TX, TY) <-
+    .abolish(last_pos(_,_)); +last_pos(FX, FY);
     ?step_wait(W); move_to(NX, NY); .wait(W); !go(TX, TY).
 
--!do_step(NX, NY, TX, TY) <-
-    .wait(500); ?position(MX, MY); !retry_step(NX, NY, TX, TY, MX, MY).
-
-+!retry_step(NX, NY, TX, TY, MX, MY) <-
-    ?step_wait(W); move_to(NX, NY); .wait(W); !go(TX, TY).
-
--!retry_step(NX, NY, TX, TY, MX, MY) : NX \== MX & MY > 0 & walkable(MX, MY-1) <-
-    ?step_wait(W); move_to(MX, MY-1); .wait(W); !go(TX, TY).
--!retry_step(NX, NY, TX, TY, MX, MY) : NX \== MX & walkable(MX, MY+1) <-
-    ?step_wait(W); move_to(MX, MY+1); .wait(W); !go(TX, TY).
--!retry_step(NX, NY, TX, TY, MX, MY) : NY \== MY & walkable(MX-1, MY) <-
-    ?step_wait(W); move_to(MX-1, MY); .wait(W); !go(TX, TY).
--!retry_step(NX, NY, TX, TY, MX, MY) : NY \== MY & walkable(MX+1, MY) <-
-    ?step_wait(W); move_to(MX+1, MY); .wait(W); !go(TX, TY).
--!retry_step(NX, NY, TX, TY, MX, MY) <- .wait(1500); !go(TX, TY).
+-!do_step(_, _, _, _, TX, TY) <-
+    .wait(500); !go(TX, TY).
 
 /* ============================================================================
  * RETORNO A BASE
  * ============================================================================ */
 
-+!return_step : base(BX,BY) & position(BX,BY) <- -+returning(no).
-+!return_step : base(BX,BY) & position(MX,MY) & MY < BY & walkable(MX, MY+1) <-
-    ?step_wait(W); move_to(MX, MY+1); .wait(W).
-+!return_step : base(BX,BY) & position(MX,MY) & MY > BY & walkable(MX, MY-1) <-
-    ?step_wait(W); move_to(MX, MY-1); .wait(W).
-+!return_step : base(BX,BY) & position(MX,MY) & MX < BX & walkable(MX+1, MY) <-
-    ?step_wait(W); move_to(MX+1, MY); .wait(W).
-+!return_step : base(BX,BY) & position(MX,MY) & MX > BX & walkable(MX-1, MY) <-
-    ?step_wait(W); move_to(MX-1, MY); .wait(W).
-+!return_step <- .wait(300).
--!return_step <- .wait(300).
++!return_step : base(BX,BY) & position(BX,BY) <- -+returning(no); .abolish(last_pos(_,_)).
++!return_step : base(BX,BY) & position(MX,MY) & MY < BY & walkable(MX, MY+1) & not last_pos(MX, MY+1) <-
+    .abolish(last_pos(_,_)); +last_pos(MX,MY); ?step_wait(W); move_to(MX, MY+1); .wait(W).
++!return_step : base(BX,BY) & position(MX,MY) & MY > BY & walkable(MX, MY-1) & not last_pos(MX, MY-1) <-
+    .abolish(last_pos(_,_)); +last_pos(MX,MY); ?step_wait(W); move_to(MX, MY-1); .wait(W).
++!return_step : base(BX,BY) & position(MX,MY) & MX < BX & walkable(MX+1, MY) & not last_pos(MX+1, MY) <-
+    .abolish(last_pos(_,_)); +last_pos(MX,MY); ?step_wait(W); move_to(MX+1, MY); .wait(W).
++!return_step : base(BX,BY) & position(MX,MY) & MX > BX & walkable(MX-1, MY) & not last_pos(MX-1, MY) <-
+    .abolish(last_pos(_,_)); +last_pos(MX,MY); ?step_wait(W); move_to(MX-1, MY); .wait(W).
++!return_step <- .abolish(last_pos(_,_)); .wait(300).
+-!return_step <- .abolish(last_pos(_,_)); .wait(300).
 
 /* ============================================================================
  * ERRORES
@@ -713,6 +727,12 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 +error(shelf_full, _) <- true.
 
 +error(too_far, _)           : state(busy) <- .wait(300); ?current_container(CId); ?target_shelf(Sh); !execute_task(CId, Sh).
+/* Durante fase de salida: esperar y reintentar la tarea de salida en lugar de ignorar */
++error(conflict, _) : current_exit(CId) & current_exit_info(CId, W, H, Weight, Type, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] Conflicto en salida — reintentando tarea salida ", CId);
+    .wait(300);
+    !execute_exit_task(CId, W, H, Weight, Type, ShelfId).
 +error(conflict, _)          <- true.
 +error(route_blocked, _)     <- true.
 +error(container_blocking, _) <- .wait(300).
@@ -744,6 +764,8 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 
 +robot_at(X,Y) <-
     -+position(X,Y);
+    /* Movimiento exitoso → reset contador de conflictos consecutivos */
+    .abolish(conflict_count(_));
     .my_name(Me);
     .broadcast(tell, peer_at_pos(Me, X, Y)).
 
@@ -778,27 +800,28 @@ type_in_active_deadline(Type) :-
 type_in_active_deadline(Type) :-
     deadline_active(nonurgent) & (Type == "standard" | Type == "fragile").
 
-/* Reacción reactiva a exit_required (hint del scheduler): lanzar check inmediato */
-+exit_required(CId, Type, ShelfId)[source(_)]
-    : state(idle) & type_in_active_deadline(Type)
-    & stored_at(CId, ShelfId, W, H, Weight, _)
-    & can_handle(W, H, Weight)
-    & not claimed_exit(CId) & not intending_exit(CId) <-
-    !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId).
-
+/* Reacción a exit_required: NO disparamos !bid_exit_if_free aquí.
+ * Si lo hiciéramos, crearíamos una intención paralela al main_loop que
+ * compite por el mismo container y puede ganar simultáneamente.
+ * El main_loop con check_exit_pending ya cubre todos los casos. */
 +exit_required(_, _, _) <- true.
 
 /* Búsqueda activa AUTÓNOMA: los robots escanean sus propios stored_at
  * para decidir qué contenedor transportar a la zona de salida.
  * No dependen de mensajes explícitos — deciden solos según el deadline activo. */
+/* Búsqueda activa AUTÓNOMA: el robot escanea su propio stored_at y elige
+ * el primer container válido del deadline activo. NO es recursiva: procesa
+ * un único container por iteración del main_loop. La recursión interna
+ * causaba que el robot pujase por todos los stored_at simultáneamente
+ * antes de que +state(busy) se propagara, ganando 5 subastas a la vez
+ * sin poder ejecutar ninguna (el robot solo puede llevar uno). */
 +!check_exit_pending
     : state(idle) & deadline_active(_)
     & stored_at(CId, ShelfId, W, H, Weight, Type)
     & type_in_active_deadline(Type)
     & can_handle(W, H, Weight)
     & not claimed_exit(CId) & not intending_exit(CId) <-
-    !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId);
-    !check_exit_pending.
+    !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId).
 +!check_exit_pending <- true.
 
 /* Subasta de salida: reaprovecha el delay normal */
@@ -841,6 +864,17 @@ type_in_active_deadline(Type) :-
     -intending_exit(CId);
     .print("[", Me, "] Retirado de SALIDA ", CId, " — gana ", Other).
 
+/* Mismo delay: desempate por nombre (el menor lexicográfico gana) */
++intend_exit(CId, Other)[source(Other)]
+    : intending_exit(CId) & peer_bid_delay(Other, OtherD) & bid_delay(MyD) & OtherD == MyD <-
+    .my_name(Me);
+    .term2atom(Me, MeA);
+    .term2atom(Other, OtherA);
+    if (OtherA < MeA) {
+        -intending_exit(CId);
+        .print("[", Me, "] Retirado de SALIDA ", CId, " — desempate nombre: ", Other)
+    }.
+
 +intend_exit(_, _) <- true.
 
 /* Resolver subasta de salida con chequeo de rivales antes de reclamar */
@@ -880,6 +914,12 @@ type_in_active_deadline(Type) :-
  *   4) emitir log container_delivered y notificar al scheduler */
 +!execute_exit_task(CId, W, H, Weight, Type, ShelfId) <-
     .my_name(Me);
+    /* Escalonar la salida según bid_delay para evitar que todos los robots
+     * se muevan simultáneamente hacia la zona OUT y se bloqueen mutuamente.
+     * El robot con menor bid_delay (más prioritario) sale primero. */
+    ?bid_delay(BD);
+    StartDelay = BD / 4;
+    .wait(StartDelay);
     /* Verificar que el container sigue existiendo en su shelf antes de salir */
     if (not stored_at(CId, ShelfId, _, _, _, _)) {
         .print("[", Me, "] container ", CId, " ya no en ", ShelfId, " — abortando exit");
@@ -894,6 +934,19 @@ type_in_active_deadline(Type) :-
     !get_shelf_dest(ShelfId, SX, SY);
     !go(SX, SY);
     .wait(100);
+    /* Segunda verificación justo antes del pickup: otro robot puede haber
+     * llegado primero y ya retirado el paquete. Si stored_at ya no existe,
+     * abortar limpiamente sin ir a la zona de salida. */
+    if (not stored_at(CId, ShelfId, _, _, _, _)) {
+        .print("[", Me, "] container ", CId, " ya recogido por otro robot — abortando");
+        .broadcast(untell, claimed_exit(CId));
+        .broadcast(tell, exit_done(CId));
+        -claimed_exit(CId);
+        -current_exit(CId);
+        -current_exit_info(CId, _, _, _, _, _);
+        -+state(idle);
+        .fail
+    };
     /* Recoger físicamente el contenedor de la estantería */
     pickup_from_shelf(CId, ShelfId);
     .wait(100);
@@ -901,18 +954,11 @@ type_in_active_deadline(Type) :-
     -stored_at(CId, ShelfId, _, _, _, _);
     .broadcast(untell, stored_at(CId, ShelfId, W, H, Weight, Type));
     +carrying_exit(CId);
-    /* Ruta distinta por robot para evitar atascos:
-     * 1) ir a fila exit_corridor_y manteniendo X actual
-     * 2) ir horizontalmente a la columna del exit_drop_cell
-     * 3) bajar (o subir) hasta la celda exit_drop_cell */
-    ?exit_drop_cell(EX, EY);
-    ?exit_corridor_y(CorrY);
-    ?position(CX2, CY2);
-    !go(CX2, CorrY);
-    ?position(CX3, _);
-    !go(EX, CorrY);
-    ?position(_, CY3);
-    !go(EX, EY);
+    /* Cada robot deposita SIEMPRE en su celda fija asignada. Sin búsqueda
+     * dinámica: un robot, una celda, siempre. Esto elimina cualquier
+     * conflicto de elección simultánea entre robots. */
+    ?exit_drop_cell_robot(Me, EX, EY);
+    !move_to_exit_drop(EX, EY);
     .wait(100);
     /* Depositar físicamente en la zona de salida */
     drop_at_exit(EX, EY);
@@ -927,13 +973,10 @@ type_in_active_deadline(Type) :-
     -claimed_exit(CId);
     -current_exit_info(CId, _, _, _, _, _);
     -carrying_exit(CId);
-    /* CRÍTICO: escapar de la zona de salida ANTES de retirar current_exit.
-     * Si retirásemos current_exit aquí, las celdas de exit zone (donde
-     * acabamos de soltar) se bloquean inmediatamente y el robot quedaría
-     * atrapado. Navegamos a base aún en estado busy y con current_exit
-     * activo para que las celdas sigan siendo transitables. */
-    ?base(BX, BY);
-    !go(BX, BY);
+    ?base(BX, _);
+    !go(EX, 2);
+    !go(3, 2);
+    !go(BX, 4);
     -current_exit(CId);
     -+state(idle).
 
@@ -942,32 +985,57 @@ type_in_active_deadline(Type) :-
     .print("[", Me, "] FALLO tarea salida ", CId);
     .send(scheduler, tell, robot_error(Me, CId, exit_failed));
     .broadcast(untell, claimed_exit(CId));
+    /* Liberar reserva de celda de salida si existía */
+    if (exit_cell_reserved(EX2, EY2)) {
+        -exit_cell_reserved(EX2, EY2);
+        .broadcast(untell, exit_cell_reserved(EX2, EY2))
+    };
     -claimed_exit(CId);
     -current_exit(CId);
     -current_exit_info(CId, _, _, _, _, _);
     -carrying_exit(CId);
     -+state(idle).
 
-/* Sincronización de deadline_active desde scheduler.
- * Si el robot está idle, lanza inmediatamente check_exit_pending
- * para no esperar la próxima iteración del main_loop. */
+/* ============================================================================
+ * MOVIMIENTO HACIA ZONA DE SALIDA
+ * Usa !go (respeta walkable, shelf_cell, peer_blocks) con waypoints seguros.
+ * Ruta: Y=4 (pasillo libre) → X=0 (columna izquierda libre) → Y=1
+ *       → EX (columna drop) → EY (fila drop).
+ * Y=4 es el único pasillo horizontal garantizado libre de shelf_cell y bases.
+ * ============================================================================ */
+
++!move_to_exit_drop(EX, EY) <-
+    /* Paso 1: llegar al pasillo Y=4 (libre de shelves y bases) */
+    !go(0, 4);
+    /* Paso 2: bajar a Y=1 dentro de exit_zone */
+    !go(0, 1);
+    /* Paso 3: ajustar columna al drop */
+    !go(EX, 1);
+    /* Paso 4: ajustar fila al drop (EY=0 o EY=1) */
+    !go(EX, EY).
+
+/* Sincronización de deadline_active desde scheduler. */
 +deadline_active(Group)[source(_)] <-
     .my_name(Me);
     .print("[", Me, "] Deadline activo: ", Group);
-    if (state(idle)) {
-        !check_exit_pending
-    }.
+    .abolish(pending_container(_, _, _, _, _));
+    .abolish(intending(_));
+    .abolish(claimed(_));
+    .abolish(bid_attempted(_));
+    .abolish(intending_exit(_));
+    .abolish(last_pos(_,_)).
 
 -deadline_active(Group)[source(_)] <-
     .my_name(Me);
     .print("[", Me, "] Deadline finalizado: ", Group);
-    /* Al terminar el deadline, hay espacio liberado: limpiar bloqueos locales
-     * para que los contenedores pendientes puedan intentarse de nuevo */
+    .abolish(last_pos(_,_));
     .abolish(no_shelf_available(_)).
 
 /* Cuando otro robot informa que un container de salida ya está hecho,
- * limpiamos cualquier exit_required y claimed_exit colgado para él. */
+ * limpiamos claimed_exit, exit_required Y stored_at local para que ningún
+ * robot vuelva a pujar por un paquete que ya fue entregado. */
 +exit_done(CId)[source(_)] <-
     .abolish(exit_required(CId, _, _));
     .abolish(claimed_exit(CId));
+    .abolish(stored_at(CId, _, _, _, _, _));
     -exit_done(CId)[source(_)].

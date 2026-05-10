@@ -65,10 +65,21 @@ delta_t(30000).
     !check_and_broadcast;
     !main_loop.
 
++!check_and_broadcast : output_phase_active <-
+    /* Durante fase de salida, retiramos los pending_container del BB de los
+     * robots para que no sigan pujando por ellos en lugar de los urgentes. */
+    !untell_all_pending.
+
 +!check_and_broadcast <-
     !broadcast_urgents;
     !broadcast_normals;
     .abolish(skip(_)).
+
++!untell_all_pending : pending(CId, W, H, Weight, Type) & not skip(CId) <-
+    .broadcast(untell, pending_container(CId, W, H, Weight, Type));
+    +skip(CId);
+    !untell_all_pending.
++!untell_all_pending <- .abolish(skip(_)).
 
 +!broadcast_urgents : pending(CId, W, H, Weight, "urgent") & not skip(CId) <-
     .broadcast(tell, pending_container(CId, W, H, Weight, "urgent"));
