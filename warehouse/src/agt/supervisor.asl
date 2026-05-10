@@ -89,8 +89,6 @@ shelf_state("shelf_9", 0, 0).
     .print("    Total:    ", S+F+U);
     .print("  Tareas completadas: ", TC);
     .print("  Errores totales:    ", E);
-    .print("  --- Estado de robots ---");
-    .send(scheduler, achieve, estado);
     .print("==========================================");
     .print("").
 
@@ -127,61 +125,87 @@ shelf_state("shelf_9", 0, 0).
  * ============================================================================ */
 
 
-/* Regla: una estanteria urgente tiene hueco si su capacidad no esta llena
- * (usamos un peso/volumen minimo simbolico de 1kg/1u para detectar si PODRIA caber algo) */
+/* Una shelf tiene hueco si queda margen para un paquete mínimo (5kg, 1u).
+ * El ciclo se dispara cuando NINGUNA shelf del grupo tiene hueco. */
 any_urgent_shelf_free :-
-    ( shelf_state("shelf_1", CW, CV) & CW < 50  & CV < 8  ) |
-    ( shelf_state("shelf_5", CW, CV) & CW < 100 & CV < 12 ) |
-    ( shelf_state("shelf_8", CW, CV) & CW < 200 & CV < 20 ).
+    ( shelf_state("shelf_1", CW, CV) & 50 - CW >= 5  & 8  - CV >= 1 ) |
+    ( shelf_state("shelf_5", CW, CV) & 100 - CW >= 5 & 12 - CV >= 1 ) |
+    ( shelf_state("shelf_8", CW, CV) & 200 - CW >= 5 & 20 - CV >= 1 ).
 
 any_nonurgent_shelf_free :-
-    ( shelf_state("shelf_2", CW, CV) & CW < 50  & CV < 8  ) |
-    ( shelf_state("shelf_3", CW, CV) & CW < 50  & CV < 8  ) |
-    ( shelf_state("shelf_4", CW, CV) & CW < 50  & CV < 8  ) |
-    ( shelf_state("shelf_6", CW, CV) & CW < 100 & CV < 12 ) |
-    ( shelf_state("shelf_7", CW, CV) & CW < 100 & CV < 12 ) |
-    ( shelf_state("shelf_9", CW, CV) & CW < 200 & CV < 20 ).
+    ( shelf_state("shelf_2", CW, CV) & 50 - CW >= 5  & 8  - CV >= 1 ) |
+    ( shelf_state("shelf_3", CW, CV) & 50 - CW >= 5  & 8  - CV >= 1 ) |
+    ( shelf_state("shelf_4", CW, CV) & 50 - CW >= 5  & 8  - CV >= 1 ) |
+    ( shelf_state("shelf_6", CW, CV) & 100 - CW >= 5 & 12 - CV >= 1 ) |
+    ( shelf_state("shelf_7", CW, CV) & 100 - CW >= 5 & 12 - CV >= 1 ) |
+    ( shelf_state("shelf_9", CW, CV) & 200 - CW >= 5 & 20 - CV >= 1 ).
 
-/* Comprobar espacio para grupo urgent */
-+!check_space(urgent) : not any_urgent_shelf_free & not space_full(urgent) <-
+/* Comprobar espacio para grupo urgent: dispara si NINGUNA tiene hueco
+ * y no estamos ya en ciclo de salida para urgent */
++!check_space(urgent) : not any_urgent_shelf_free & not space_full(urgent) & not cycle_active(urgent) <-
     +space_full(urgent);
+    +cycle_active(urgent);
     .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
     .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=urgent");
     .send(scheduler, tell, no_space(urgent)).
 
-/* Si aun hay hueco urgente y estaba marcado como lleno, liberar */
 +!check_space(urgent) : any_urgent_shelf_free & space_full(urgent) <-
-    -space_full(urgent);
-    .send(scheduler, tell, space_available(urgent)).
+    -space_full(urgent).
 
-/* Sin cambio de estado: nada que hacer */
 +!check_space(urgent) <- true.
 
-/* Comprobar espacio para grupo nonurgent */
-+!check_space(nonurgent) : not any_nonurgent_shelf_free & not space_full(nonurgent) <-
+/* Comprobar espacio para grupo nonurgent: dispara si NINGUNA tiene hueco
+ * y no estamos ya en ciclo de salida para nonurgent */
++!check_space(nonurgent) : not any_nonurgent_shelf_free & not space_full(nonurgent) & not cycle_active(nonurgent) <-
     +space_full(nonurgent);
+    +cycle_active(nonurgent);
     .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
     .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=nonurgent");
     .send(scheduler, tell, no_space(nonurgent)).
 
-/* Si aun hay hueco nonurgent y estaba marcado como lleno, liberar */
 +!check_space(nonurgent) : any_nonurgent_shelf_free & space_full(nonurgent) <-
-    -space_full(nonurgent);
-    .send(scheduler, tell, space_available(nonurgent)).
+    -space_full(nonurgent).
 
-/* Sin cambio de estado: nada que hacer */
 +!check_space(nonurgent) <- true.
 
-/* El scheduler informa del estado actual de cada estanteria para que el supervisor pueda evaluarlo */
+/* El scheduler nos avisa cuando terminó un ciclo de salida; reseteamos guard */
++cycle_finished(Group)[source(scheduler)] <-
+    -cycle_active(Group);
+    -space_full(Group);
+    -cycle_finished(Group)[source(scheduler)].
+
+/* El robot informa del estado actual de cada estanteria tras reservar/liberar */
 +shelf_report(ShelfId, CW, CV)[source(_)] <-
     -shelf_state(ShelfId, _, _);
-    +shelf_state(ShelfId, CW, CV).
+    +shelf_state(ShelfId, CW, CV);
+    .print("[Supervisor] ", ShelfId, " -> CW=", CW, " CV=", CV);
+    -shelf_report(ShelfId, CW, CV)[source(_)];
+    !check_space(urgent);
+    !check_space(nonurgent).
+
+/* Un robot reporta que un container no cabe en ninguna estantería de su tipo.
+ * Bloqueado durante el ciclo: cycle_active impide redisparar. */
++no_fit(CId, "urgent")[source(_)] : not cycle_active(urgent) <-
+    +cycle_active(urgent);
+    +space_full(urgent);
+    .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
+    .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=urgent");
+    .send(scheduler, tell, no_space(urgent));
+    -no_fit(CId, "urgent")[source(_)].
+
++no_fit(CId, Type)[source(_)] : (Type == "standard" | Type == "fragile") & not cycle_active(nonurgent) <-
+    +cycle_active(nonurgent);
+    +space_full(nonurgent);
+    .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
+    .print("EVENT | time=", T, " | agent=supervisor | type=no_space_detected | data=nonurgent");
+    .send(scheduler, tell, no_space(nonurgent));
+    -no_fit(CId, Type)[source(_)].
+
++no_fit(CId, Type)[source(_)] <- -no_fit(CId, Type)[source(_)].
 
 /* Cuando una tarea termina correctamente, actualizar el total completado y reevaluar espacio */
 +task_done(CId, Robot)[source(scheduler)] <-
     ?total_completados(N); -total_completados(N); +total_completados(N+1);
-    /* Pedir al scheduler el estado actualizado de las estanterias para reevaluar */
-    .send(scheduler, achieve, report_shelves);
     !check_space(urgent);
     !check_space(nonurgent).
 

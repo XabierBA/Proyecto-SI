@@ -18,6 +18,8 @@ base(2,3).
 step_wait(300).            /* velocidad media */
 my_capacity(30, 1, 2).     /* peso, ancho, alto */
 default_shelf("shelf_5").
+exit_drop_cell(1, 0).
+exit_corridor_y(5).
 
 
 
@@ -30,3 +32,5 @@ peer_bid_delay(robot_heavy_2, 900).
 peer_capacity(robot_light,    10, 1, 1).
 peer_capacity(robot_heavy,   100, 2, 3).
 peer_capacity(robot_heavy_2, 100, 2, 3).
+
+exit_slot(1, 0).

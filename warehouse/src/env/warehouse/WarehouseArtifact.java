@@ -57,6 +57,15 @@ public class WarehouseArtifact extends Environment {
     private int totalErrors = 0;
     private long startTime;
 
+    // Métricas del ciclo de salida (deadlines)
+    private int deliveredUrgent = 0;
+    private int deliveredNonurgent = 0;
+    private int totalToDeliverUrgent = 0;
+    private int totalToDeliverNonurgent = 0;
+    private long deadlineEndUrgent = 0;
+    private long deadlineEndNonurgent = 0;
+    private String activeDeadline = "none";
+
     // Gestión del thread generador de contenedores
     private ExecutorService containerGeneratorExecutor;
     private volatile boolean running = true;
@@ -352,6 +361,16 @@ public class WarehouseArtifact extends Environment {
                     return executePickup(agName, action);
                 case "drop_at":
                     return executeDropAt(agName, action);
+                case "pickup_from_shelf":
+                    return executePickupFromShelf(agName, action);
+                case "drop_at_exit":
+                    return executeDropAtExit(agName, action);
+                case "retire_from_exit":
+                    return executeRetireFromExit(agName, action);
+                case "register_deadline":
+                    return executeRegisterDeadline(agName, action);
+                case "end_deadline":
+                    return executeEndDeadline(agName, action);
                 case "get_container_info":
                     return executeGetContainerInfo(agName, action);
                 default:
@@ -406,6 +425,14 @@ public class WarehouseArtifact extends Environment {
             }
 
             robot.setPosition(targetX, targetY);
+
+            // Si el robot lleva un contenedor, actualizar también su posición visual
+            if (robot.isCarrying()) {
+                Container carried = robot.getCarriedContainer();
+                if (carried != null) {
+                    carried.setPosition(targetX, targetY);
+                }
+            }
 
             if (view != null) {
                 view.logMessage(String.format("➡️  %s moved to (%d,%d)", agName, targetX, targetY));
@@ -735,5 +762,245 @@ public class WarehouseArtifact extends Environment {
             urgentQueue.clear();
             normalQueue.clear();
         }
+    }
+
+    /**
+     * Acción: pickup_from_shelf(ContainerId, ShelfId)
+     * Recoge un contenedor previamente almacenado en una estantería.
+     * El robot debe estar adyacente a la estantería.
+     */
+    private boolean executePickupFromShelf(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            String shelfId = action.getTerm(1).toString().replace("\"", "");
+
+            Robot robot = robots.get(agName);
+            Shelf shelf = shelves.get(shelfId);
+            Container container = containers.get(containerId);
+
+            if (robot == null || shelf == null || container == null) {
+                addError(agName, "invalid_pickup_from_shelf", "Robot, shelf o container no encontrado");
+                return false;
+            }
+
+            if (robot.isCarrying()) {
+                addError(agName, "already_carrying", "El robot ya lleva un contenedor");
+                return false;
+            }
+
+            // Comprobar que el contenedor está realmente en esa estantería
+            if (container.getAssignedShelf() == null || !container.getAssignedShelf().equals(shelfId)) {
+                addError(agName, "container_not_in_shelf",
+                        "Container " + containerId + " no está en " + shelfId);
+                return false;
+            }
+
+            // Comprobar adyacencia a la estantería
+            int minDist = Integer.MAX_VALUE;
+            for (int dx = 0; dx < shelf.getWidth(); dx++) {
+                for (int dy = 0; dy < shelf.getHeight(); dy++) {
+                    int d = robot.distanceTo(shelf.getX() + dx, shelf.getY() + dy);
+                    if (d < minDist) minDist = d;
+                }
+            }
+            if (minDist > 1) {
+                addError(agName, "too_far", "Shelf demasiado lejos");
+                return false;
+            }
+
+            // Sacar el contenedor de la estantería: liberar capacidad y recogerlo
+            try {
+                shelf.remove(container.getId(),
+                             (double) container.getWeight(),
+                             container.getWidth() * container.getHeight());
+            } catch (Exception ignored) {
+                // contabilidad lógica también se hace en Jason via release_shelf
+            }
+            container.setAssignedShelf(null);
+            container.setPicked(true);
+            // Posicionar el contenedor en la posición del robot para que la vista lo dibuje
+            container.setPosition(robot.getX(), robot.getY());
+            robot.pickup(container);
+
+            // Percepts consistentes con un pickup normal
+            removePerceptsByUnif(Literal.parseLiteral("stored(\"" + containerId + "\",_)"));
+            addPercept(agName, Literal.parseLiteral("picked(\"" + containerId + "\")"));
+            addPercept(agName, Literal.parseLiteral("picked_from_shelf(\"" + containerId + "\",\"" + shelfId + "\")"));
+
+            if (view != null) {
+                view.logMessage(String.format("📤 %s recogió %s de %s", agName, containerId, shelfId));
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: drop_at_exit(X, Y)
+     * Deposita el contenedor en la zona de salida.
+     * El robot debe estar en una celda de la zona de salida (X 0-2, Y 0-1).
+     */
+    private boolean executeDropAtExit(String agName, Structure action) {
+        try {
+            int targetX = (int) ((NumberTerm) action.getTerm(0)).solve();
+            int targetY = (int) ((NumberTerm) action.getTerm(1)).solve();
+
+            Robot robot = robots.get(agName);
+            if (robot == null) {
+                addError(agName, "invalid_drop_at_exit", "Robot no encontrado");
+                return false;
+            }
+
+            if (!robot.isCarrying()) {
+                addError(agName, "not_carrying", "El robot no lleva contenedor");
+                return false;
+            }
+
+            // Validar que (X,Y) es zona de salida (X 0-2, Y 0-1)
+            if (targetX < 0 || targetX > 2 || targetY < 0 || targetY > 1) {
+                addError(agName, "not_exit_zone", "(" + targetX + "," + targetY + ") no es zona de salida");
+                return false;
+            }
+
+            // Validar que el robot está en esa celda o adyacente
+            int dx = Math.abs(robot.getX() - targetX);
+            int dy = Math.abs(robot.getY() - targetY);
+            if (dx + dy > 1) {
+                addError(agName, "too_far_exit", "Robot demasiado lejos de la zona de salida");
+                return false;
+            }
+
+            Container container = robot.getCarriedContainer();
+            String containerId = container.getId();
+            String containerType = container.getType();
+            robot.drop();
+
+            // Posicionar el contenedor en la celda de la zona de salida
+            container.setPosition(targetX, targetY);
+            container.setPicked(false);
+            container.setAssignedShelf(null);
+
+            // Incrementar contador de entregados según tipo
+            if ("urgent".equals(containerType)) {
+                deliveredUrgent++;
+            } else {
+                deliveredNonurgent++;
+            }
+
+            // Hacer visible su posición a todos los agentes
+            removePerceptsByUnif(Literal.parseLiteral("container_at(\"" + containerId + "\",_,_)"));
+            addPercept(Literal.parseLiteral("container_at(\"" + containerId + "\","
+                    + targetX + "," + targetY + ")"));
+            addPercept(Literal.parseLiteral("at_exit(\"" + containerId + "\")"));
+            removePerceptsByUnif(agName, Literal.parseLiteral("picked(_)"));
+
+            addPercept(agName, Literal.parseLiteral("delivered(\"" + containerId + "\")"));
+
+            if (view != null) {
+                view.logMessage(String.format("🚚 %s depositó %s en zona de salida (%d,%d)",
+                        agName, containerId, targetX, targetY));
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: retire_from_exit(ContainerId)
+     * El Transport retira un contenedor depositado en la zona de salida.
+     */
+    private boolean executeRetireFromExit(String agName, Structure action) {
+        try {
+            String containerId = action.getTerm(0).toString().replace("\"", "");
+            Container container = containers.get(containerId);
+            if (container == null) {
+                addError(agName, "container_not_found", "Container " + containerId + " not found");
+                return false;
+            }
+            removePerceptsByUnif(Literal.parseLiteral("container_at(\"" + containerId + "\",_,_)"));
+            removePerceptsByUnif(Literal.parseLiteral("at_exit(\"" + containerId + "\")"));
+            containers.remove(containerId);
+            if (view != null) {
+                view.logMessage(String.format("🚛 Transport retira %s de zona de salida", containerId));
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: register_deadline(Group, TotalToDeliver, EndTimeMs)
+     * El scheduler informa al artifact del deadline activo.
+     */
+    private boolean executeRegisterDeadline(String agName, Structure action) {
+        try {
+            String group = action.getTerm(0).toString().replace("\"", "");
+            int total = (int) ((NumberTerm) action.getTerm(1)).solve();
+            long endTime = (long) ((NumberTerm) action.getTerm(2)).solve();
+            if ("urgent".equals(group)) {
+                totalToDeliverUrgent = total;
+                deliveredUrgent = 0;
+                deadlineEndUrgent = endTime;
+                activeDeadline = "urgent";
+            } else {
+                totalToDeliverNonurgent = total;
+                deliveredNonurgent = 0;
+                deadlineEndNonurgent = endTime;
+                activeDeadline = "nonurgent";
+            }
+            if (view != null) {
+                view.logMessage(String.format("⏱️  Deadline %s iniciado: %d contenedores a entregar",
+                        group, total));
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    /**
+     * Acción: end_deadline(Group)
+     * El scheduler informa al artifact que el deadline terminó.
+     */
+    private boolean executeEndDeadline(String agName, Structure action) {
+        try {
+            String group = action.getTerm(0).toString().replace("\"", "");
+            activeDeadline = "none";
+            if (view != null) {
+                int delivered = "urgent".equals(group) ? deliveredUrgent : deliveredNonurgent;
+                int total = "urgent".equals(group) ? totalToDeliverUrgent : totalToDeliverNonurgent;
+                view.logMessage(String.format("⏱️  Deadline %s terminado: %d/%d entregados",
+                        group, delivered, total));
+                view.update();
+            }
+            return true;
+        } catch (Exception e) {
+            e.printStackTrace();
+            return false;
+        }
+    }
+
+    // Getters para que la WarehouseView muestre la información del deadline
+    public int getDeliveredUrgent()         { return deliveredUrgent; }
+    public int getDeliveredNonurgent()      { return deliveredNonurgent; }
+    public int getTotalToDeliverUrgent()    { return totalToDeliverUrgent; }
+    public int getTotalToDeliverNonurgent() { return totalToDeliverNonurgent; }
+    public String getActiveDeadline()       { return activeDeadline; }
+    public long getDeadlineRemainingMs() {
+        long now = System.currentTimeMillis();
+        if ("urgent".equals(activeDeadline))    return Math.max(0, deadlineEndUrgent - now);
+        if ("nonurgent".equals(activeDeadline)) return Math.max(0, deadlineEndNonurgent - now);
+        return 0;
     }
 }
