@@ -1,8 +1,15 @@
 /*******************************************************************************
  * ROBOT COMMON - Lógica Fusionada y Autónoma
+ *
+ * Este archivo contiene las reglas de comportamiento compartidas por todos
+ * los robots reponedores. Define el mapa del almacén, las zonas de tránsito,
+ * las reglas de subasta y la ejecución de tareas de almacenamiento y salida.
  ******************************************************************************/
 
 /* --- Estado inicial común --- */
+/* El estado idle indica que el robot no está ejecutando una tarea activa.
+ * returning(no) se usa para distinguir la vuelta a base de otras transiciones.
+ */
 state(idle).
 returning(no).
 
@@ -38,6 +45,9 @@ is_class_zone(X,Y) :- X >= 3 & X <= 4 & Y >= 0 & Y <= 1.
 is_entry_zone(X,Y) :- X >= 5 & X <= 7 & Y >= 0 & Y <= 1.
 
 /* --- Colisiones y tránsito --- */
+/* Definición de obstáculos fijos y reglas dinámicas para la navegación.
+ * Incluye estanterías, límites del grid, bases de robots y zonas restringidas.
+ */
 blocked(X,Y) :- shelf_cell(X,Y).
 blocked(X,Y) :- X < 0 | X >= 20 | Y < 0 | Y >= 15.
 /* Bases de los otros robots: bloqueadas durante la fase de salida (current_exit
@@ -90,11 +100,15 @@ shelf_allows_type_local("shelf_7", "standard"). shelf_allows_type_local("shelf_7
 shelf_allows_type_local("shelf_9", "standard"). shelf_allows_type_local("shelf_9", "fragile").
 
 /* --- Capacidad --- */
+/* Comprueba si el robot puede cargar un contenedor según sus límites.
+ * Se usa tanto en la subasta de entrada como en la de salida.
+ */
 can_handle(W, H, Weight) :-
     my_capacity(MW, MWd, MHt) & Weight <= MW & W <= MWd & H <= MHt.
 
 /* Algún peer con menor bid_delay también puede cargar este paquete.
- * Si no, no tiene sentido esperar — saltamos el delay para evitar inanición. */
+ * Si no, no tiene sentido esperar — saltamos el delay para evitar inanición.
+ */
 peer_competes(W, H, Weight) :-
     bid_delay(MyD) & peer_bid_delay(Peer, PD) & PD < MyD &
     peer_capacity(Peer, PMW, PMWd, PMHt) &

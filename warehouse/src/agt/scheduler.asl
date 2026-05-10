@@ -56,7 +56,7 @@ delta_t(30000).
 !start.
 
 +!start <-
-    .print("[Scheduler] ⭐ MODO AUTÓNOMO OPERATIVO - Publicando para robots");
+    .print("[Scheduler] MODO AUTÓNOMO OPERATIVO - Publicando para robots");
     !main_loop.
 
 /* ========== CICLO DE REVISIÓN (Cada 500 ms) ========== */
@@ -67,7 +67,9 @@ delta_t(30000).
 
 +!check_and_broadcast : output_phase_active <-
     /* Durante fase de salida, retiramos los pending_container del BB de los
-     * robots para que no sigan pujando por ellos en lugar de los urgentes. */
+     * robots para que no sigan pujando por ellos en lugar de los urgentes.
+     * Este paso garantiza que la fase de salida tenga prioridad sobre nuevos
+     * mensajes de entrada pendientes. */
     !untell_all_pending.
 
 +!check_and_broadcast <-
@@ -101,9 +103,9 @@ delta_t(30000).
 +container_info(CId, W, H, Weight, Type) <-
     -container_info(CId, W, H, Weight, Type);
     if (blocked_type(Type) | output_phase_active) {
-        .print("[Scheduler] 🚫 RECHAZADO (Fase Salida): ", CId)
+        .print("[Scheduler] RECHAZADO (Fase Salida): ", CId)
     } else {
-        .print("[Scheduler] 📥 NUEVO: ", CId, " (", Type, ")");
+        .print("[Scheduler] NUEVO: ", CId, " (", Type, ")");
         +pending(CId, W, H, Weight, Type);
         .send(supervisor, tell, container_counted(CId, W, H, Weight, Type));
         !check_and_broadcast
@@ -283,7 +285,7 @@ delta_t(30000).
  * (o si stored ya no existía por cualquier razón). */
 +container_delivered(CId, Robot, Type)[source(_)] <-
     .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
-    .print("[Scheduler] ✅ container_delivered confirmado: ", CId, " por ", Robot, " tipo=", Type);
+    .print("[Scheduler] container_delivered confirmado: ", CId, " por ", Robot, " tipo=", Type);
     /* Si at_exit aún no fue registrado, hacerlo ahora con el tipo del robot */
     if (not at_exit(CId, _)) {
         +at_exit(CId, Type)

@@ -13,6 +13,7 @@
 { include("robot_common.asl") }
 
 /* Particularidades del robot medium */
+/* Configuración específica de posición, capacidad y prioridad de subasta. */
 position(2,3).
 base(2,3).
 step_wait(300).            /* velocidad media */

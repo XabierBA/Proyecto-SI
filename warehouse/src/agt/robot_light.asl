@@ -13,6 +13,7 @@
 { include("robot_common.asl") }
 
 /* Particularidades del robot light */
+/* Configuración específica de posición, capacidad y comportamiento de subasta. */
 position(1,3).
 base(1,3).
 step_wait(150).            /* velocidad alta -> espera corta */

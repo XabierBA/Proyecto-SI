@@ -23,7 +23,9 @@ import javax.swing.SwingUtilities;
 import javax.swing.Timer;
 
 /**
- * Vista visual 2D del almacén
+ * Vista visual del almacén.
+ * Representa el grid, robots, contenedores y estanterías.
+ * Incluye paneles de estado y registro de actividad.
  */
 public class WarehouseView extends JFrame {
     
@@ -55,15 +57,18 @@ public class WarehouseView extends JFrame {
         pack();
         setLocationRelativeTo(null);
         
-        // Actualizar cada segundo
+        // Actualiza la vista cada segundo
         Timer timer = new Timer(1000, e -> update());
         timer.start();
     }
     
+    /**
+     * Configura los componentes de la interfaz gráfica.
+     */
     private void initComponents() {
         warehousePanel = new WarehousePanel();
         
-        // Panel de información
+        // Panel de información lateral
         infoPanel = new JPanel();
         infoPanel.setLayout(new BoxLayout(infoPanel, BoxLayout.Y_AXIS));
         infoPanel.setPreferredSize(new Dimension(INFO_PANEL_WIDTH, gridHeight * CELL_SIZE));
@@ -71,7 +76,7 @@ public class WarehouseView extends JFrame {
         infoPanel.setBorder(BorderFactory.createEmptyBorder(10, 10, 10, 10));
         
         // Estadísticas generales
-        JLabel statsLabel = new JLabel("📊 Statistics");
+        JLabel statsLabel = new JLabel("Estadísticas");
         statsLabel.setFont(new Font("Arial", Font.BOLD, 15));
         statsLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         
@@ -86,7 +91,7 @@ public class WarehouseView extends JFrame {
         statsScroll.setPreferredSize(new Dimension(430, 110));
         
         // Estado de robots
-        JLabel robotsLabel = new JLabel("🤖 Robots");
+        JLabel robotsLabel = new JLabel("Robots");
         robotsLabel.setFont(new Font("Arial", Font.BOLD, 15));
         robotsLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         
@@ -101,7 +106,7 @@ public class WarehouseView extends JFrame {
         robotsScroll.setPreferredSize(new Dimension(430, 180));
         
         // Estado de estanterías
-        JLabel shelvesLabel = new JLabel("📦 Shelves");
+        JLabel shelvesLabel = new JLabel("Estanterías");
         shelvesLabel.setFont(new Font("Arial", Font.BOLD, 15));
         shelvesLabel.setAlignmentX(Component.LEFT_ALIGNMENT);
         
@@ -133,7 +138,7 @@ public class WarehouseView extends JFrame {
         consolePanel.setLayout(new BorderLayout());
         consolePanel.setPreferredSize(new Dimension(gridWidth * CELL_SIZE + INFO_PANEL_WIDTH, CONSOLE_HEIGHT));
         
-        JLabel consoleLabel = new JLabel("📝 Console - Robot Activity Log");
+        JLabel consoleLabel = new JLabel("Consola - Registro de actividad");
         consoleLabel.setFont(new Font("Arial", Font.BOLD, 14));
         consoleLabel.setBorder(BorderFactory.createEmptyBorder(5, 10, 5, 10));
         consoleLabel.setOpaque(true);
@@ -160,6 +165,9 @@ public class WarehouseView extends JFrame {
     
     private JPanel consolePanel;
     
+    /**
+     * Organiza los componentes en el layout principal.
+     */
     private void setupLayout() {
         setLayout(new BorderLayout());
         add(warehousePanel, BorderLayout.CENTER);
@@ -168,7 +176,7 @@ public class WarehouseView extends JFrame {
     }
     
     /**
-     * Actualiza la visualización
+     * Actualiza la representación gráfica y los datos de estado.
      */
     public void update() {
         warehousePanel.repaint();
@@ -176,10 +184,10 @@ public class WarehouseView extends JFrame {
     }
     
     /**
-     * Actualiza el panel de información
+     * Actualiza los paneles de estadísticas, robots y estanterías.
      */
     private void updateInfo() {
-        // Estadísticas
+        // Estadísticas generales
         statsArea.setText(warehouse.getStatistics());
         
         // Robots
@@ -211,7 +219,7 @@ public class WarehouseView extends JFrame {
     }
     
     /**
-     * Añade un mensaje a la consola
+     * Registra un mensaje con marca temporal en la consola de actividad.
      */
     public void logMessage(String message) {
         SwingUtilities.invokeLater(() -> {
@@ -235,7 +243,7 @@ public class WarehouseView extends JFrame {
     }
     
     /**
-     * Panel donde se dibuja el warehouse
+     * Panel gráfico que renderiza la rejilla y los objetos del almacén.
      */
     class WarehousePanel extends JPanel {
         

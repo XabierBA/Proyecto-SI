@@ -14,6 +14,11 @@
  *
  ******************************************************************************/
 
+/* Este agente actúa como controlador global del sistema.
+ * Recibe eventos del scheduler y de los robots para mantener métricas,
+ * detectar falta de espacio y disparar ciclos de salida cuando sea necesario.
+ */
+
 /* ============================================================================
  *  Estadisticas globales del supervisor
  *  total_errores: numero total de errores detectados

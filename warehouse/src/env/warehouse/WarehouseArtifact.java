@@ -14,9 +14,9 @@ import jason.asSyntax.Structure;
 import jason.environment.Environment;
 
 /**
- * Artefacto del almacén automatizado
- * Proporciona la API para que los agentes interactúen con el entorno
- * Incluye sistema de cola de prioridad FIFO para gestión de paquetes
+ * Artefacto del almacén automatizado.
+ * Proporciona la API para la interacción de agentes con el entorno.
+ * Gestiona la generación de contenedores, el grid, robots y estanterías.
  */
 public class WarehouseArtifact extends Environment {
 
@@ -96,12 +96,12 @@ public class WarehouseArtifact extends Environment {
         view.setVisible(true);
 
         // Mensaje de bienvenida en la consola
-        view.logMessage("✨ ========================================");
-        view.logMessage("🏢 Warehouse Management System Initialized");
-        view.logMessage("   Grid: " + GRID_WIDTH + "x" + GRID_HEIGHT);
-        view.logMessage("   Robots: " + robots.size());
-        view.logMessage("   Shelves: " + shelves.size());
-        view.logMessage("✨ ========================================");
+        view.logMessage("========================================");
+        view.logMessage("Sistema de almacén inicializado");
+        view.logMessage("Rejilla: " + GRID_WIDTH + "x" + GRID_HEIGHT);
+        view.logMessage("Robots: " + robots.size());
+        view.logMessage("Estanterías: " + shelves.size());
+        view.logMessage("========================================");
         view.logMessage("");
 
         // Iniciar generador de contenedores
@@ -112,10 +112,10 @@ public class WarehouseArtifact extends Environment {
 
         startTime = System.currentTimeMillis();
 
-        System.out.println("Warehouse environment initialized");
-        System.out.println("Grid size: " + GRID_WIDTH + "x" + GRID_HEIGHT);
+        System.out.println("Entorno de almacén inicializado");
+        System.out.println("Tamaño de rejilla: " + GRID_WIDTH + "x" + GRID_HEIGHT);
         System.out.println("Robots: " + robots.size());
-        System.out.println("Shelves: " + shelves.size());
+        System.out.println("Estanterías: " + shelves.size());
     }
 
     /**
@@ -242,11 +242,11 @@ public class WarehouseArtifact extends Environment {
                     containers.put(container.getId(), container);
                     pendingContainers.offer(container);
 
-                    System.out.println("New container generated: " + container);
+                    System.out.println("Contenedor generado: " + container);
 
                     // Log a la consola de la GUI
                     if (view != null) {
-                        view.logMessage(String.format("🆕 New container: %s (%.1fkg, %s) [%dx%d] @(%d,%d)",
+                        view.logMessage(String.format("Nuevo contenedor: %s (%.1fkg, %s) [%dx%d] @(%d,%d)",
                                 container.getId(), container.getWeight(), container.getType(),
                                 container.getWidth(), container.getHeight(),
                                 container.getX(), container.getY()));
@@ -269,15 +269,15 @@ public class WarehouseArtifact extends Environment {
                     e.printStackTrace();
                 }
             }
-            System.out.println("Container generator stopped");
+            System.out.println("Generador de contenedores detenido");
         });
     }
 
     /**
-     * Detiene el entorno de forma limpia
+     * Detiene el entorno y finaliza el hilo generador de contenedores.
      */
     public void stop() {
-        System.out.println("Stopping warehouse environment...");
+        System.out.println("Deteniendo entorno de almacén...");
         running = false;
 
         if (containerGeneratorExecutor != null) {
@@ -292,11 +292,11 @@ public class WarehouseArtifact extends Environment {
             }
         }
 
-        System.out.println("Warehouse environment stopped");
+        System.out.println("Entorno de almacén detenido");
     }
 
     /**
-     * Genera un contenedor aleatorio
+     * Genera un contenedor con propiedades aleatorias y ubicacion de entrada.
      */
     private Container generateRandomContainer() {
         Random rand = new Random();
@@ -331,7 +331,7 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Busca la primera posición libre en la L de la zona de entrada.
+     * Busca la primera posición libre en la zona de entrada en forma de L.
      */
     private int[] findFreeLPosition() {
         for (int[] pos : L_POSITIONS) {
@@ -349,6 +349,9 @@ public class WarehouseArtifact extends Environment {
         return null;
     }
 
+    /**
+     * Redirige la acción solicitada por el agente al método ejecutor correspondiente.
+     */
     @Override
     public boolean executeAction(String agName, Structure action) {
         try {
@@ -435,7 +438,7 @@ public class WarehouseArtifact extends Environment {
             }
 
             if (view != null) {
-                view.logMessage(String.format("➡️  %s moved to (%d,%d)", agName, targetX, targetY));
+                view.logMessage(String.format("%s se movió a (%d,%d)", agName, targetX, targetY));
             }
 
             removePerceptsByUnif(agName, Literal.parseLiteral("robot_at(_,_)"));
@@ -480,7 +483,7 @@ public class WarehouseArtifact extends Environment {
                 pendingContainers.remove(container);
 
                 if (view != null) {
-                    view.logMessage(String.format("📦 %s recogió %s", agName, containerId));
+                    view.logMessage(String.format("%s recogió %s", agName, containerId));
                     view.update();
                 }
                 return true;
@@ -543,7 +546,7 @@ public class WarehouseArtifact extends Environment {
             addPercept(agName, Literal.parseLiteral("stored(\"" + container.getId() + "\",\"" + shelfId + "\")"));
 
             if (view != null) {
-                view.logMessage(String.format("✅ %s stored %s at %s", agName, container.getId(), shelfId));
+                view.logMessage(String.format("%s almacenó %s en %s", agName, container.getId(), shelfId));
                 view.update();
             }
 
@@ -563,7 +566,7 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: get_container_info(ContainerId)
-     * Obtiene información sobre un contenedor
+     * Recupera las propiedades del contenedor para el agente.
      */
     private boolean executeGetContainerInfo(String agName, Structure action) {
         try {
@@ -590,7 +593,7 @@ public class WarehouseArtifact extends Environment {
     }
 
     /**
-     * Agrega un error a las percepciones
+     * Añade un percepto de error para el agente especificado.
      */
     private void addError(String agName, String errorType, String data) {
         totalErrors++;
@@ -653,8 +656,7 @@ public class WarehouseArtifact extends Environment {
     // ============================================================================
 
     /**
-     * Cola de prioridad que respeta FIFO
-     * Los paquetes URGENTES se procesan PRIMERO siempre
+     * Cola de prioridad FIFO para contenedores urgentes y normales.
      */
     public static class PriorityFIFOQueue {
 
@@ -674,11 +676,11 @@ public class WarehouseArtifact extends Environment {
         public void offer(Container container) {
             if ("urgent".equals(container.getType())) {
                 urgentQueue.offer(container);
-                System.out.println("[COLA] ⚡ URGENTE añadido: " + container.getId() + 
+                System.out.println("[COLA] URGENTE añadido: " + container.getId() + 
                     " (Urgentes en cola: " + urgentQueue.size() + ")");
             } else {
                 normalQueue.offer(container);
-                System.out.println("[COLA] 📦 NORMAL añadido: " + container.getId());
+                System.out.println("[COLA] NORMAL añadido: " + container.getId());
             }
         }
 
@@ -690,14 +692,14 @@ public class WarehouseArtifact extends Environment {
             // PRIMERO: revisar urgentes
             Container urgent = urgentQueue.poll();
             if (urgent != null) {
-                System.out.println("[COLA] ⚡ Asignando URGENTE: " + urgent.getId());
+                System.out.println("[COLA] Asignando URGENTE: " + urgent.getId());
                 return urgent;
             }
 
             // SEGUNDO: revisar normales (solo si NO hay urgentes)
             Container normal = normalQueue.poll();
             if (normal != null) {
-                System.out.println("[COLA] 📦 Asignando NORMAL: " + normal.getId());
+                System.out.println("[COLA] Asignando NORMAL: " + normal.getId());
             }
             return normal;
         }
@@ -766,8 +768,7 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: pickup_from_shelf(ContainerId, ShelfId)
-     * Recoge un contenedor previamente almacenado en una estantería.
-     * El robot debe estar adyacente a la estantería.
+     * Recoge un contenedor almacenado y actualiza el estado de la estantería.
      */
     private boolean executePickupFromShelf(String agName, Structure action) {
         try {
@@ -828,7 +829,7 @@ public class WarehouseArtifact extends Environment {
             addPercept(agName, Literal.parseLiteral("picked_from_shelf(\"" + containerId + "\",\"" + shelfId + "\")"));
 
             if (view != null) {
-                view.logMessage(String.format("📤 %s recogió %s de %s", agName, containerId, shelfId));
+                view.logMessage(String.format("%s recogió %s de %s", agName, containerId, shelfId));
                 view.update();
             }
             return true;
@@ -840,8 +841,7 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: drop_at_exit(X, Y)
-     * Deposita el contenedor en la zona de salida.
-     * El robot debe estar en una celda de la zona de salida (X 0-2, Y 0-1).
+     * Deposita el contenedor en la zona de salida y actualiza sus percepciones.
      */
     private boolean executeDropAtExit(String agName, Structure action) {
         try {
@@ -900,7 +900,7 @@ public class WarehouseArtifact extends Environment {
             addPercept(agName, Literal.parseLiteral("delivered(\"" + containerId + "\")"));
 
             if (view != null) {
-                view.logMessage(String.format("🚚 %s depositó %s en zona de salida (%d,%d)",
+                view.logMessage(String.format("%s depositó %s en zona de salida (%d,%d)",
                         agName, containerId, targetX, targetY));
                 view.update();
             }
@@ -913,7 +913,7 @@ public class WarehouseArtifact extends Environment {
 
     /**
      * Acción: retire_from_exit(ContainerId)
-     * El Transport retira un contenedor depositado en la zona de salida.
+     * Retira el contenedor de la zona de salida y limpia sus perceptos.
      */
     private boolean executeRetireFromExit(String agName, Structure action) {
         try {
@@ -927,7 +927,7 @@ public class WarehouseArtifact extends Environment {
             removePerceptsByUnif(Literal.parseLiteral("at_exit(\"" + containerId + "\")"));
             containers.remove(containerId);
             if (view != null) {
-                view.logMessage(String.format("🚛 Transport retira %s de zona de salida", containerId));
+                view.logMessage(String.format("Transport retira %s de zona de salida", containerId));
                 view.update();
             }
             return true;
@@ -958,7 +958,7 @@ public class WarehouseArtifact extends Environment {
                 activeDeadline = "nonurgent";
             }
             if (view != null) {
-                view.logMessage(String.format("⏱️  Deadline %s iniciado: %d contenedores a entregar",
+                view.logMessage(String.format("Deadline %s iniciado: %d contenedores a entregar",
                         group, total));
                 view.update();
             }
@@ -980,7 +980,7 @@ public class WarehouseArtifact extends Environment {
             if (view != null) {
                 int delivered = "urgent".equals(group) ? deliveredUrgent : deliveredNonurgent;
                 int total = "urgent".equals(group) ? totalToDeliverUrgent : totalToDeliverNonurgent;
-                view.logMessage(String.format("⏱️  Deadline %s terminado: %d/%d entregados",
+                view.logMessage(String.format("Deadline %s terminado: %d/%d entregados",
                         group, delivered, total));
                 view.update();
             }

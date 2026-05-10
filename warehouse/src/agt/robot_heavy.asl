@@ -13,6 +13,7 @@
 { include("robot_common.asl") }
 
 /* Particularidades del robot heavy */
+/* Configuración específica de posición, capacidad y prioridad de subasta. */
 position(3,3).
 base(3,3).
 step_wait(500).            /* velocidad baja */
