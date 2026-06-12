@@ -1,4 +1,4 @@
-/*******************************************************************************
+    /*******************************************************************************
  * ROBOT COMMON - Lógica Fusionada y Autónoma
  *
  * Este archivo contiene las reglas de comportamiento compartidas por todos
@@ -882,8 +882,26 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     -+position(X,Y);
     /* Movimiento exitoso → reset contador de conflictos consecutivos */
     .abolish(conflict_count(_));
+    /* Optimización: solo broadcast si hay cambio significativo de posición (>2 celdas)
+     * o si es el primer broadcast (evita 80 msgs en un camino de 20 pasos) */
+    !broadcast_position_if_needed(X, Y).
+
++!broadcast_position_if_needed(X, Y)
+    : not last_broadcast_pos(_, _) <-
+    /* Primer movimiento: siempre broadcast */
     .my_name(Me);
+    +last_broadcast_pos(X, Y);
     .broadcast(tell, peer_at_pos(Me, X, Y)).
+
++!broadcast_position_if_needed(X, Y)
+    : last_broadcast_pos(LX, LY) & (X-LX)*(X-LX) + (Y-LY)*(Y-LY) > 4 <-
+    /* Distancia > 2 celdas: actualizar broadcast */
+    .my_name(Me);
+    -last_broadcast_pos(LX, LY);
+    +last_broadcast_pos(X, Y);
+    .broadcast(tell, peer_at_pos(Me, X, Y)).
+
++!broadcast_position_if_needed(_, _) <- true.
 
 /* Recibir y mantener posiciones de los peers (sobreescribiendo la anterior).
  * Filtramos el caso en que el peer somos nosotros mismos para no bloquearnos. */
@@ -1140,12 +1158,14 @@ type_in_active_deadline(Type) :-
     .abolish(claimed(_));
     .abolish(bid_attempted(_));
     .abolish(intending_exit(_));
-    .abolish(last_pos(_,_)).
+    .abolish(last_pos(_,_));
+    .abolish(last_broadcast_pos(_, _)).
 
 -deadline_active(Group)[source(_)] <-
     .my_name(Me);
     .print("[", Me, "] Deadline finalizado: ", Group);
     .abolish(last_pos(_,_));
+    .abolish(last_broadcast_pos(_, _));
     .abolish(no_shelf_available(_)).
 
 /* Cuando otro robot informa que un container de salida ya está hecho,
