@@ -121,6 +121,21 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     Weight + UsedW <= MaxW & Area + UsedV <= MaxV.
 
 /* ============================================================================
+ * PREDICADOS AUXILIARES — TIPOS DE CONTENEDORES
+ * ============================================================================ */
+
+/* Tipos urgentes */
+is_urgent_type("urgent").
+
+/* Tipos no urgentes */
+is_nonurgent_type("standard").
+is_nonurgent_type("fragile").
+
+/* Verificación genérica si un tipo es válido para cualquier grupo */
+is_valid_type(Type) :- is_urgent_type(Type).
+is_valid_type(Type) :- is_nonurgent_type(Type).
+
+/* ============================================================================
  * INICIO Y BUCLE PRINCIPAL
  * ============================================================================ */
 
@@ -163,7 +178,7 @@ has_exit_work :-
     deadline_active(urgent) & stored_at(CId, _, _, _, _, "urgent") & not claimed_exit(CId).
 has_exit_work :-
     deadline_active(nonurgent) & stored_at(CId, _, _, _, _, Type)
-    & (Type == "standard" | Type == "fragile") & not claimed_exit(CId).
+    & is_nonurgent_type(Type) & not claimed_exit(CId).
 
 /* Volver a base paso a paso. En cada paso comprueba si está idle y no en base.
  * Si llega un pending compatible, check_pending lo cogerá en la siguiente iter
@@ -194,7 +209,7 @@ has_exit_work :-
     : state(busy) & not deadline_active(_) & can_handle(W, H, Weight)
     & not claimed(CId) & not intending(CId)
     & current_container(OldCId) & not carrying(OldCId)
-    & current_task_info(OldCId, _, _, _, OldType) & OldType \== "urgent"
+    & current_task_info(OldCId, _, _, _, OldType) & is_nonurgent_type(OldType)
     & not preempt_pending(_)
     & not no_shelf_available(CId) <-
     .my_name(Me);
@@ -463,8 +478,13 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .abolish(shelf_blocked(_));
     -+state(idle).
 
-/* drop_at falló en la nueva estantería → +error(shelf_full,_) lo gestionará */
--!try_deliver_to_next(CId, _, _, _, _) : error(shelf_full, _) & target_shelf(_) <- true.
+/* drop_at falló en la nueva estantería → +error(shelf_full,_) lo gestionará.
+   Se registra el evento para auditoría antes de que sea procesado por el manejador de error. */
+-!try_deliver_to_next(CId, _, _, _, _) : error(shelf_full, _) & target_shelf(_) <-
+    .my_name(Me);
+    ?target_shelf(FullShelf);
+    .print("[ERROR TRACE | ", Me, "] Fallo entrega a alternativa para CId=", CId, " en ", FullShelf, " (shelf_full) - manejador de error procesará recuperación");
+    true.
 
 /* find_shelf_alt_local falló (todas agotadas) → abortar y volver a base */
 -!try_deliver_to_next(CId, W, H, Weight, _) <-
@@ -649,8 +669,12 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .abolish(shelf_blocked(_));
     -+state(idle).
 
-/* Si la causa es shelf_full: no limpiar nada, el handler de error lo gestiona */
--!execute_task(CId, ShelfId) : error(shelf_full, _) <- true.
+/* Si la causa es shelf_full: no limpiar nada, el handler de error lo gestiona.
+   Se registra el evento para auditoría y rastreo del error real. */
+-!execute_task(CId, ShelfId) : error(shelf_full, _) <-
+    .my_name(Me);
+    .print("[ERROR TRACE | ", Me, "] Fallo ejecución tarea CId=", CId, " en ", ShelfId, " (shelf_full) - manejador de error procesará recuperación");
+    true.
 
 /* Cualquier otro fallo: liberar reserva y limpiar */
 -!execute_task(CId, ShelfId) <-
@@ -671,12 +695,27 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 +!go_adjacent(CX, CY) : walkable(CX+1, CY) <- !go(CX+1, CY).
 +!go_adjacent(CX, CY) : walkable(CX-1, CY) <- !go(CX-1, CY).
 +!go_adjacent(CX, CY) : walkable(CX, CY-1) <- !go(CX, CY-1).
-+!go_adjacent(CX, CY) <- .wait(500); !go_adjacent(CX, CY).
++!go_adjacent(CX, CY) : not go_adjacent_attempts(_, _) <-
+    +go_adjacent_attempts(CX, CY, 0);
+    .wait(500);
+    !go_adjacent(CX, CY).
++!go_adjacent(CX, CY) : go_adjacent_attempts(CX, CY, N) & N < 5 <-
+    -go_adjacent_attempts(CX, CY, N);
+    N1 = N + 1;
+    +go_adjacent_attempts(CX, CY, N1);
+    .wait(500);
+    !go_adjacent(CX, CY).
++!go_adjacent(CX, CY) : go_adjacent_attempts(_, _, _) <-
+    .my_name(Me);
+    .abolish(go_adjacent_attempts(_, _, _));
+    .print("[", Me, "] FALLO: go_adjacent(", CX, ",", CY, ") máx intentos alcanzado");
+    .fail.
 
 /* Anti-oscilación: last_pos registra la celda de origen antes de cada paso.
  * Las reglas excluyen last_pos como destino inmediato, evitando A->B->A.
- * Fallback: si todo está bloqueado o apunta a last_pos, borrar y esperar 1s. */
-+!go(TX, TY) : position(TX, TY) <- .abolish(last_pos(_,_)).
+ * Fallback: si todo está bloqueado o apunta a last_pos, borrar y esperar 1s.
+ * Contador de intentos: máx 10 intentos para evitar recursión infinita. */
++!go(TX, TY) : position(TX, TY) <- .abolish(last_pos(_,_)); .abolish(go_attempts(_,_,_)).
 +!go(TX, TY) : position(MX, MY) & MY < TY & walkable(MX, MY+1) & not last_pos(MX, MY+1) <- !do_step(MX, MY, MX, MY+1, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MY > TY & walkable(MX, MY-1) & not last_pos(MX, MY-1) <- !do_step(MX, MY, MX, MY-1, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX < TX & walkable(MX+1, MY) & not last_pos(MX+1, MY) <- !do_step(MX, MY, MX+1, MY, TX, TY).
@@ -685,7 +724,24 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 +!go(TX, TY) : position(MX, MY) & MY \== TY & walkable(MX+1, MY) & not last_pos(MX+1, MY) <- !do_step(MX, MY, MX+1, MY, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY-1) & not last_pos(MX, MY-1) <- !do_step(MX, MY, MX, MY-1, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY+1) & not last_pos(MX, MY+1) <- !do_step(MX, MY, MX, MY+1, TX, TY).
-+!go(TX, TY) <- .abolish(last_pos(_,_)); .wait(1000); !go(TX, TY).
++!go(TX, TY) : not go_attempts(_, _, _) <-
+    .abolish(last_pos(_,_));
+    +go_attempts(TX, TY, 0);
+    .wait(1000);
+    !go(TX, TY).
++!go(TX, TY) : go_attempts(TX, TY, N) & N < 10 <-
+    -go_attempts(TX, TY, N);
+    N1 = N + 1;
+    +go_attempts(TX, TY, N1);
+    .abolish(last_pos(_,_));
+    .wait(1000);
+    !go(TX, TY).
++!go(TX, TY) : go_attempts(_, _, _) <-
+    .my_name(Me);
+    .abolish(go_attempts(_, _, _));
+    .abolish(last_pos(_,_));
+    .print("[", Me, "] FALLO: go(", TX, ",", TY, ") máx intentos alcanzado");
+    .fail.
 
 +!do_step(FX, FY, NX, NY, TX, TY) <-
     .abolish(last_pos(_,_)); +last_pos(FX, FY);
@@ -737,8 +793,12 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     -target_shelf(FullShelf);
     !try_deliver_to_next(CId, W, H, Weight, Type).
 
-/* Guardia de seguridad: si no hay target_shelf en BB, ignorar sin disparar handler genérico */
-+error(shelf_full, _) <- true.
+/* Guardia de seguridad: si no hay target_shelf en BB, ignorar y registrar */
++error(shelf_full, _) <-
+    .my_name(Me);
+    .print("[", Me, "] ERROR: shelf_full sin contexto (target_shelf no disponible)");
+    .send(scheduler, tell, robot_error(Me, unknown, shelf_full_no_context));
+    -+state(idle).
 
 +error(too_far, _)           : state(busy) <- .wait(300); ?current_container(CId); ?target_shelf(Sh); !execute_task(CId, Sh).
 /* Durante fase de salida: esperar y reintentar la tarea de salida en lugar de ignorar */
@@ -747,9 +807,51 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .print("[", Me, "] Conflicto en salida — reintentando tarea salida ", CId);
     .wait(300);
     !execute_exit_task(CId, W, H, Weight, Type, ShelfId).
-+error(conflict, _)          <- true.
-+error(route_blocked, _)     <- true.
-+error(container_blocking, _) <- .wait(300).
+
+/* Conflicto fuera de fase de salida: registrar y recuperarse */
++error(conflict, _) <-
+    .my_name(Me);
+    ?current_container(CId);
+    .print("[", Me, "] ERROR conflict durante tarea entrada para ", CId);
+    .send(scheduler, tell, robot_error(Me, CId, conflict_during_entry));
+    .abolish(conflict_count(_));
+    .wait(500);
+    if (current_container(CId)) {
+        .print("[", Me, "] Reintentando tarea entrada tras conflicto");
+        ?target_shelf(Sh);
+        !execute_task(CId, Sh)
+    } else {
+        -+state(idle)
+    }.
+/* Ruta bloqueada: registrar e intentar recalcular */
++error(route_blocked, _) <-
+    .my_name(Me);
+    ?current_container(CId);
+    if (current_container(CId)) {
+        .print("[", Me, "] ERROR route_blocked para ", CId, " - reintentando");
+        .send(scheduler, tell, robot_error(Me, CId, route_blocked));
+        .wait(500);
+        ?target_shelf(Sh);
+        !execute_task(CId, Sh)
+    } else {
+        .print("[", Me, "] ERROR route_blocked sin tarea activa");
+        .send(scheduler, tell, robot_error(Me, unknown, route_blocked_idle));
+        -+state(idle)
+    }.
+
+/* Contenedor bloqueando: esperar y reintentar con registro */
++error(container_blocking, _) <-
+    .my_name(Me);
+    .print("[", Me, "] ERROR container_blocking - esperando y reintentando");
+    .wait(500);
+    if (current_container(CId2)) {
+        ?target_shelf(Sh);
+        !execute_task(CId2, Sh)
+    } else {
+        .print("[", Me, "] container_blocking pero sin tarea activa");
+        .send(scheduler, tell, robot_error(Me, unknown, container_blocking_idle));
+        -+state(idle)
+    }.
 +error(Tipo, _) <- .my_name(Me); .send(scheduler, tell, robot_error(Me, none, Tipo)); -+state(idle).
 
 /* ============================================================================
@@ -810,9 +912,9 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 
 /* Tipo del contenedor pertenece al deadline activo */
 type_in_active_deadline(Type) :-
-    deadline_active(urgent)    & Type == "urgent".
+    deadline_active(urgent)    & is_urgent_type(Type).
 type_in_active_deadline(Type) :-
-    deadline_active(nonurgent) & (Type == "standard" | Type == "fragile").
+    deadline_active(nonurgent) & is_nonurgent_type(Type).
 
 /* Reacción a exit_required: NO disparamos !bid_exit_if_free aquí.
  * Si lo hiciéramos, crearíamos una intención paralela al main_loop que
