@@ -596,70 +596,185 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 /* Actualizar capacidad usada de una estantería tras entregar */
 +!update_shelf_used(ShelfId, Weight, Area) <- true. /* reserva ya hecha al reclamar */
 
+/* ============================================================================
+ * NUEVA ARQUITECTURA: +!execute_task DESCOMPUESTO EN SUBFASES ATÓMICAS
+ * ============================================================================
+ * Cada subfase es un plan independiente con contexto de selección específico.
+ * Si una subfase falla, su manejador -! sabe exactamente qué limpiar.
+ * Esto permite recuperación granular y saber DÓNDE falló exactamente.
+ * ============================================================================ */
+
+/* Punto de entrada: valida precondiciones básicas y delega a subfases */
 +!execute_task(CId, ShelfId) <-
     .my_name(Me);
-    .print("[", Me, "] execute_task ", CId, " paso 1 get_container_info");
+    .print("[", Me, "] [INIT] execute_task inicio para ", CId);
+    !execute_task_validate_container(CId, ShelfId).
+
+/* ---- SUBFASE 1: Validar que el contenedor existe ---- */
++!execute_task_validate_container(CId, ShelfId) : container_at(CId, CX, CY) <-
+    .my_name(Me);
     get_container_info(CId);
     .wait(100);
-    .print("[", Me, "] execute_task ", CId, " paso 2 ?container_at");
-    if (not container_at(CId, _, _)) {
-        .print("[", Me, "] container ", CId, " ya no existe — limpiando");
-        ?current_task_info(CId, W, H, Weight, Type);
-        !release_shelf(ShelfId, Weight, W*H);
-        .broadcast(untell, claimed(CId));
-        .broadcast(tell, container_done(CId));
-        .abolish(pending_container(CId, _, _, _, _));
-        -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-        -current_task_info(CId, _, _, _, _);
-        -+state(idle);
-        .fail
+    .print("[", Me, "] [PHASE-1] Container validado en (", CX, ",", CY, ")");
+    !execute_task_navigate_pickup(CId, ShelfId, CX, CY).
+
++!execute_task_validate_container(CId, ShelfId) : not container_at(CId, _, _) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-1] FALLO: container ", CId, " no existe");
+    -+state(idle);
+    .fail.
+
+-!execute_task_validate_container(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-1 ERROR] Validación contenedor falló para ", CId);
+    if (current_task_info(CId, W, H, Weight, _)) {
+        !release_shelf(ShelfId, Weight, W*H)
     };
-    ?container_at(CId, CX, CY);
-    .print("[", Me, "] execute_task ", CId, " paso 3 go_adjacent ", CX, ",", CY);
+    .send(scheduler, tell, robot_error(Me, CId, container_validation_failed));
+    .broadcast(untell, claimed(CId));
+    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    .abolish(shelf_blocked(_));
+    -+state(idle).
+
+/* ---- SUBFASE 2: Navegar al contenedor ---- */
++!execute_task_navigate_pickup(CId, ShelfId, CX, CY) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-2] Navegando a pickup (", CX, ",", CY, ")");
     !go_adjacent(CX, CY);
-    /* Antes del pickup, comprobar si hay flag de preempción por urgente */
-    if (preempt_pending(_)) {
-        .print("[", Me, "] PREEMPT activado: abortando ", CId);
-        ?current_task_info(CId, W, H, Weight, Type);
-        !release_shelf(ShelfId, Weight, W*H);
-        .broadcast(untell, claimed(CId));
-        -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-        -current_task_info(CId, _, _, _, _);
-        .abolish(preempt_pending(_));
-        -+state(idle);
-        .fail
+    .print("[", Me, "] [PHASE-2] Navegación completada");
+    !execute_task_check_preemption(CId, ShelfId).
+
+-!execute_task_navigate_pickup(CId, ShelfId, CX, CY) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-2 ERROR] Navegación a pickup falló para ", CId);
+    if (current_task_info(CId, W, H, Weight, _)) {
+        !release_shelf(ShelfId, Weight, W*H)
     };
-    .print("[", Me, "] execute_task ", CId, " paso 4 pickup");
+    .send(scheduler, tell, robot_error(Me, CId, navigation_to_pickup_failed));
+    .broadcast(untell, claimed(CId));
+    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    .abolish(shelf_blocked(_));
+    -+state(idle).
+
+/* ---- SUBFASE 2B: Verificar preempción antes de recoger ---- */
++!execute_task_check_preemption(CId, ShelfId) : preempt_pending(_) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-2B] PREEMPT detectado: abortando ", CId);
+    if (current_task_info(CId, W, H, Weight, _)) {
+        !release_shelf(ShelfId, Weight, W*H)
+    };
+    .broadcast(untell, claimed(CId));
+    .abolish(preempt_pending(_));
+    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    .abolish(shelf_blocked(_));
+    -+state(idle);
+    .fail.
+
++!execute_task_check_preemption(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-2B] Sin preempción, continuando");
+    !execute_task_do_pickup(CId, ShelfId).
+
+/* ---- SUBFASE 3: Recoger el contenedor ---- */
++!execute_task_do_pickup(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-3] Recogiendo contenedor ", CId);
     pickup(CId);
     +carrying(CId);
     .wait(100);
-    .print("[", Me, "] execute_task ", CId, " paso 5 get_shelf_dest");
-    !get_shelf_dest(ShelfId, SX, SY);
-    .print("[", Me, "] execute_task ", CId, " paso 6 go ", SX, ",", SY);
-    !go(SX, SY);
-    .print("[", Me, "] execute_task ", CId, " paso 7 drop_at");
-    ?current_task_info(CId, W, H, Weight, Type);
-    /* VALIDACIÓN CRÍTICA: verificar que la estantería acepta este tipo */
-    if (not shelf_allows_type_local(ShelfId, Type)) {
-        .print("[", Me, "] ERROR CRÍTICO: ", ShelfId, " NO acepta tipo ", Type, " para ", CId);
-        !release_shelf(ShelfId, Weight, W*H);
-        .broadcast(untell, claimed(CId));
-        .send(scheduler, tell, robot_error(Me, CId, wrong_shelf_type));
-        -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-        -current_task_info(CId, _, _, _, _);
-        -carrying(CId);
-        .abolish(shelf_blocked(_));
-        -+state(idle);
-        .fail
+    .print("[", Me, "] [PHASE-3] Contenedor recogido exitosamente");
+    !execute_task_navigate_delivery(CId, ShelfId).
+
+-!execute_task_do_pickup(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-3 ERROR] Pickup falló para ", CId);
+    if (current_task_info(CId, W, H, Weight, _)) {
+        !release_shelf(ShelfId, Weight, W*H)
     };
+    .send(scheduler, tell, robot_error(Me, CId, pickup_failed));
+    .broadcast(untell, claimed(CId));
+    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    -carrying(CId);
+    .abolish(shelf_blocked(_));
+    -+state(idle).
+
+/* ---- SUBFASE 4: Navegar a la estantería de entrega ---- */
++!execute_task_navigate_delivery(CId, ShelfId) <-
+    .my_name(Me);
+    !get_shelf_dest(ShelfId, SX, SY);
+    .print("[", Me, "] [PHASE-4] Navegando a entrega (", SX, ",", SY, ")");
+    !go(SX, SY);
+    .print("[", Me, "] [PHASE-4] Navegación a entrega completada");
+    !execute_task_do_delivery(CId, ShelfId).
+
+-!execute_task_navigate_delivery(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-4 ERROR] Navegación a entrega falló para ", CId);
+    if (current_task_info(CId, W, H, Weight, _)) {
+        !release_shelf(ShelfId, Weight, W*H)
+    };
+    .send(scheduler, tell, robot_error(Me, CId, navigation_to_delivery_failed));
+    .broadcast(untell, claimed(CId));
+    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    -carrying(CId);
+    .abolish(shelf_blocked(_));
+    -+state(idle).
+
+/* ---- SUBFASE 5: Validar y entregar el contenedor ---- */
++!execute_task_do_delivery(CId, ShelfId) : current_task_info(CId, W, H, Weight, Type) & shelf_allows_type_local(ShelfId, Type) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-5] Entregando en ", ShelfId, " (tipo válido: ", Type, ")");
     drop_at(ShelfId);
     .wait(100);
-    ?current_task_info(CId, W, H, Weight, Type);
+    .print("[", Me, "] [PHASE-5] Entrega exitosa");
+    !execute_task_cleanup_success(CId, ShelfId, W, H, Weight, Type).
+
++!execute_task_do_delivery(CId, ShelfId) : current_task_info(CId, W, H, Weight, Type) & not shelf_allows_type_local(ShelfId, Type) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-5 ERROR] Estantería ", ShelfId, " NO acepta tipo ", Type, " para ", CId);
+    !release_shelf(ShelfId, Weight, W*H);
+    .broadcast(untell, claimed(CId));
+    .send(scheduler, tell, robot_error(Me, CId, wrong_shelf_type));
+    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    -carrying(CId);
+    .abolish(shelf_blocked(_));
+    -+state(idle);
+    .fail.
+
+-!execute_task_do_delivery(CId, ShelfId) : error(shelf_full, _) <-
+    .my_name(Me);
+    .print("[ERROR TRACE | ", Me, "] [PHASE-5] Estantería llena para ", CId, " en ", ShelfId, " - manejador de error procesará");
+    true.
+
+-!execute_task_do_delivery(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-5 ERROR] Entrega falló para ", CId);
+    if (current_task_info(CId, W, H, Weight, _)) {
+        !release_shelf(ShelfId, Weight, W*H)
+    };
+    .send(scheduler, tell, robot_error(Me, CId, delivery_failed));
+    .broadcast(untell, claimed(CId));
+    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    -carrying(CId);
+    .abolish(shelf_blocked(_));
+    -+state(idle).
+
+/* ---- SUBFASE 6: Limpieza y finalización ---- */
++!execute_task_cleanup_success(CId, ShelfId, W, H, Weight, Type) <-
+    .my_name(Me);
+    .print("[", Me, "] [PHASE-6] Limpieza y confirmación para ", CId);
     !update_shelf_used(ShelfId, Weight, W*H);
     +stored_at(CId, ShelfId, W, H, Weight, Type);
     .broadcast(tell, stored_at(CId, ShelfId, W, H, Weight, Type));
     .send(scheduler, tell, task_complete(CId, Me));
-    .print("[", Me, "] ", CId, " -> ", ShelfId, " OK");
+    .print("[", Me, "] ", CId, " -> ", ShelfId, " [COMPLETE]");
     .broadcast(untell, claimed(CId));
     .broadcast(tell, container_done(CId));
     .abolish(pending_container(CId, _, _, _, _));
@@ -669,21 +784,10 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .abolish(shelf_blocked(_));
     -+state(idle).
 
-/* Si la causa es shelf_full: no limpiar nada, el handler de error lo gestiona.
-   Se registra el evento para auditoría y rastreo del error real. */
--!execute_task(CId, ShelfId) : error(shelf_full, _) <-
+-!execute_task_cleanup_success(CId, ShelfId, _, _, _, _) <-
     .my_name(Me);
-    .print("[ERROR TRACE | ", Me, "] Fallo ejecución tarea CId=", CId, " en ", ShelfId, " (shelf_full) - manejador de error procesará recuperación");
-    true.
-
-/* Cualquier otro fallo: liberar reserva y limpiar */
--!execute_task(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] FALLO tarea ", CId);
-    if (current_task_info(CId, W, H, Weight, _)) {
-        !release_shelf(ShelfId, Weight, W*H)
-    };
-    .send(scheduler, tell, robot_error(Me, CId, execution_failed));
+    .print("[", Me, "] [PHASE-6 ERROR] Limpieza falló para ", CId);
+    .send(scheduler, tell, robot_error(Me, CId, cleanup_failed));
     .broadcast(untell, claimed(CId));
     -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
     -current_task_info(CId, _, _, _, _);
@@ -1046,59 +1150,161 @@ type_in_active_deadline(Type) :-
  *   2) simular pickup (liberar capacidad y eliminar stored_at)
  *   3) ir a la zona de salida (celda 1,1 — pasable porque state(busy))
  *   4) emitir log container_delivered y notificar al scheduler */
+/* ============================================================================
+ * NUEVA ARQUITECTURA: +!execute_exit_task DESCOMPUESTO EN SUBFASES ATÓMICAS
+ * ============================================================================
+ * Cada subfase de salida es un plan independiente con contexto de selección.
+ * Si una subfase falla, se sabe exactamente dónde y cómo recuperarse.
+ * ============================================================================ */
+
+/* Punto de entrada: inicio planificado de la tarea de salida */
 +!execute_exit_task(CId, W, H, Weight, Type, ShelfId) <-
     .my_name(Me);
-    /* Escalonar la salida según bid_delay para evitar que todos los robots
-     * se muevan simultáneamente hacia la zona OUT y se bloqueen mutuamente.
-     * El robot con menor bid_delay (más prioritario) sale primero. */
+    .print("[", Me, "] [EXIT-INIT] Tarea salida iniciada para ", CId);
+    /* Escalonar salida por bid_delay para evitar congestión */
     ?bid_delay(BD);
     StartDelay = BD / 4;
     .wait(StartDelay);
-    /* Verificar que el container sigue existiendo en su shelf antes de salir */
-    if (not stored_at(CId, ShelfId, _, _, _, _)) {
-        .print("[", Me, "] container ", CId, " ya no en ", ShelfId, " — abortando exit");
-        .broadcast(untell, claimed_exit(CId));
-        .broadcast(tell, exit_done(CId));
-        -claimed_exit(CId);
-        -current_exit(CId);
-        -current_exit_info(CId, _, _, _, _, _);
-        -+state(idle);
-        .fail
-    };
+    !execute_exit_validate_shelf(CId, ShelfId).
+
+/* ---- SUBFASE 1: Validar que el contenedor sigue en la shelf ---- */
++!execute_exit_validate_shelf(CId, ShelfId) : stored_at(CId, ShelfId, _, _, _, _) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-1] Container validado en ", ShelfId);
+    !execute_exit_navigate_to_shelf(CId, ShelfId).
+
++!execute_exit_validate_shelf(CId, ShelfId) : not stored_at(CId, ShelfId, _, _, _, _) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-1] FALLO: container ", CId, " no en ", ShelfId);
+    .broadcast(untell, claimed_exit(CId));
+    .broadcast(tell, exit_done(CId));
+    -claimed_exit(CId);
+    -current_exit(CId);
+    -current_exit_info(CId, _, _, _, _, _);
+    -+state(idle);
+    .fail.
+
+-!execute_exit_validate_shelf(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-1 ERROR] Validación shelf falló para ", CId);
+    .send(scheduler, tell, robot_error(Me, CId, exit_shelf_validation_failed));
+    .broadcast(untell, claimed_exit(CId));
+    -claimed_exit(CId);
+    -current_exit(CId);
+    -current_exit_info(CId, _, _, _, _, _);
+    -+state(idle).
+
+/* ---- SUBFASE 2: Navegar a la estantería ---- */
++!execute_exit_navigate_to_shelf(CId, ShelfId) <-
+    .my_name(Me);
     !get_shelf_dest(ShelfId, SX, SY);
+    .print("[", Me, "] [EXIT-PHASE-2] Navegando a shelf (", SX, ",", SY, ")");
     !go(SX, SY);
     .wait(100);
-    /* Segunda verificación justo antes del pickup: otro robot puede haber
-     * llegado primero y ya retirado el paquete. Si stored_at ya no existe,
-     * abortar limpiamente sin ir a la zona de salida. */
-    if (not stored_at(CId, ShelfId, _, _, _, _)) {
-        .print("[", Me, "] container ", CId, " ya recogido por otro robot — abortando");
-        .broadcast(untell, claimed_exit(CId));
-        .broadcast(tell, exit_done(CId));
-        -claimed_exit(CId);
-        -current_exit(CId);
-        -current_exit_info(CId, _, _, _, _, _);
-        -+state(idle);
-        .fail
-    };
-    /* Recoger físicamente el contenedor de la estantería */
+    .print("[", Me, "] [EXIT-PHASE-2] Navegación completada");
+    !execute_exit_validate_shelf_second(CId, ShelfId).
+
+-!execute_exit_navigate_to_shelf(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-2 ERROR] Navegación a shelf falló para ", CId);
+    .send(scheduler, tell, robot_error(Me, CId, exit_navigation_to_shelf_failed));
+    .broadcast(untell, claimed_exit(CId));
+    -claimed_exit(CId);
+    -current_exit(CId);
+    -current_exit_info(CId, _, _, _, _, _);
+    -+state(idle).
+
+/* ---- SUBFASE 2B: Segunda validación antes de pickup (otro robot puede haberlo recogido) ---- */
++!execute_exit_validate_shelf_second(CId, ShelfId) : stored_at(CId, ShelfId, _, _, _, _) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-2B] Segunda validación OK");
+    !execute_exit_do_pickup(CId, ShelfId).
+
++!execute_exit_validate_shelf_second(CId, ShelfId) : not stored_at(CId, ShelfId, _, _, _, _) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-2B] Container ya recogido por peer — abortando");
+    .broadcast(untell, claimed_exit(CId));
+    .broadcast(tell, exit_done(CId));
+    -claimed_exit(CId);
+    -current_exit(CId);
+    -current_exit_info(CId, _, _, _, _, _);
+    -+state(idle);
+    .fail.
+
+/* ---- SUBFASE 3: Recoger de la estantería ---- */
++!execute_exit_do_pickup(CId, ShelfId) : current_exit_info(CId, W, H, Weight, Type, _) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-3] Recogiendo de shelf ", ShelfId);
     pickup_from_shelf(CId, ShelfId);
     .wait(100);
-    Area = W*H; !release_shelf(ShelfId, Weight, Area);
+    Area = W*H;
+    !release_shelf(ShelfId, Weight, Area);
     -stored_at(CId, ShelfId, _, _, _, _);
-    /* NO broadcast untell stored_at: la unificación exacta de variables puede
-     * fallar en peers. La limpieza en peers se hace exclusivamente via exit_done. */
     +carrying_exit(CId);
-    /* Cada robot deposita SIEMPRE en su celda fija asignada. Sin búsqueda
-     * dinámica: un robot, una celda, siempre. Esto elimina cualquier
-     * conflicto de elección simultánea entre robots. */
+    .print("[", Me, "] [EXIT-PHASE-3] Pickup exitoso");
+    !execute_exit_navigate_to_drop_zone(CId).
+
+-!execute_exit_do_pickup(CId, ShelfId) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-3 ERROR] Pickup de shelf falló para ", CId);
+    if (current_exit_info(CId, W, H, Weight, _, ShelfId)) {
+        !release_shelf(ShelfId, Weight, W*H)
+    };
+    .send(scheduler, tell, robot_error(Me, CId, exit_pickup_failed));
+    .broadcast(untell, claimed_exit(CId));
+    -claimed_exit(CId);
+    -current_exit(CId);
+    -current_exit_info(CId, _, _, _, _, _);
+    -carrying_exit(CId);
+    -+state(idle).
+
+/* ---- SUBFASE 4: Navegar a zona de salida ---- */
++!execute_exit_navigate_to_drop_zone(CId) <-
+    .my_name(Me);
     ?exit_drop_cell_robot(Me, EX, EY);
+    .print("[", Me, "] [EXIT-PHASE-4] Navegando a drop zone (", EX, ",", EY, ")");
     !move_to_exit_drop(EX, EY);
     .wait(100);
-    /* Depositar físicamente en la zona de salida */
+    .print("[", Me, "] [EXIT-PHASE-4] Navegación a drop zone completada");
+    !execute_exit_do_drop(CId, EX, EY).
+
+-!execute_exit_navigate_to_drop_zone(CId) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-4 ERROR] Navegación a drop zone falló para ", CId);
+    .send(scheduler, tell, robot_error(Me, CId, exit_navigation_to_drop_failed));
+    .broadcast(untell, claimed_exit(CId));
+    -claimed_exit(CId);
+    -current_exit(CId);
+    -current_exit_info(CId, _, _, _, _, _);
+    -carrying_exit(CId);
+    -+state(idle).
+
+/* ---- SUBFASE 5: Depositar en zona de salida ---- */
++!execute_exit_do_drop(CId, EX, EY) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-5] Depositando en drop zone (", EX, ",", EY, ")");
     drop_at_exit(EX, EY);
     .wait(100);
-    .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
+    .print("[", Me, "] [EXIT-PHASE-5] Drop exitoso");
+    !execute_exit_cleanup_success(CId).
+
+-!execute_exit_do_drop(CId, EX, EY) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-5 ERROR] Drop en zona salida falló para ", CId);
+    .send(scheduler, tell, robot_error(Me, CId, exit_drop_failed));
+    .broadcast(untell, claimed_exit(CId));
+    -claimed_exit(CId);
+    -current_exit(CId);
+    -current_exit_info(CId, _, _, _, _, _);
+    -carrying_exit(CId);
+    -+state(idle).
+
+/* ---- SUBFASE 6: Limpieza y notificación ---- */
++!execute_exit_cleanup_success(CId) : current_exit_info(CId, _, _, _, Type, _) <-
+    .my_name(Me);
+    .print("[", Me, "] [EXIT-PHASE-6] Limpieza y notificación para ", CId);
+    .time(HH, MM, SS);
+    .concat(HH, ":", MM, ":", SS, T);
     .print("EVENT | time=", T, " | agent=", Me, " | type=container_delivered | data=", CId);
     .send(scheduler, tell, container_at_exit(CId));
     .send(scheduler, tell, container_delivered(CId, Me, Type));
@@ -1108,23 +1314,21 @@ type_in_active_deadline(Type) :-
     -claimed_exit(CId);
     -current_exit_info(CId, _, _, _, _, _);
     -carrying_exit(CId);
+    /* Retornar a base de forma escalonada */
     ?base(BX, _);
+    ?exit_drop_cell_robot(Me, EX, EY);
     !go(EX, 2);
     !go(3, 2);
     !go(BX, 4);
+    .print("[", Me, "] [EXIT-COMPLETE] ", CId, " entregado y en base");
     -current_exit(CId);
     -+state(idle).
 
--!execute_exit_task(CId, _, _, _, _, _) <-
+-!execute_exit_cleanup_success(CId) <-
     .my_name(Me);
-    .print("[", Me, "] FALLO tarea salida ", CId);
-    .send(scheduler, tell, robot_error(Me, CId, exit_failed));
+    .print("[", Me, "] [EXIT-PHASE-6 ERROR] Limpieza falló para ", CId);
+    .send(scheduler, tell, robot_error(Me, CId, exit_cleanup_failed));
     .broadcast(untell, claimed_exit(CId));
-    /* Liberar reserva de celda de salida si existía */
-    if (exit_cell_reserved(EX2, EY2)) {
-        -exit_cell_reserved(EX2, EY2);
-        .broadcast(untell, exit_cell_reserved(EX2, EY2))
-    };
     -claimed_exit(CId);
     -current_exit(CId);
     -current_exit_info(CId, _, _, _, _, _);
