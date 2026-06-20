@@ -218,20 +218,14 @@ any_nonurgent_shelf_free :-
     !check_space(urgent);
     !check_space(nonurgent).
 
-+task_done(CId, Robot)[source(S)] : S \== scheduler <-
-    .my_name(Me);
-    .print("[WARNING | ", Me, "] Descartando task_done de fuente no confiable: ", S, " para CId=", CId);
-    true.
++task_done(CId, Robot)[source(S)] : S \== scheduler <- true.
 
 /* Cuando se recibe un error, aumentar el contador e imprimir el detalle */
 +error_occurred(Robot, CId, Tipo)[source(scheduler)] <-
     ?total_errores(N); -total_errores(N); +total_errores(N+1);
     .print("[Supervisor] ERROR: ", Robot, " - ", Tipo, " - ", CId).
 
-+error_occurred(Robot, CId, Tipo)[source(S)] : S \== scheduler <-
-    .my_name(Me);
-    .print("[WARNING | ", Me, "] Descartando error_occurred de fuente no confiable: ", S, " - Robot=", Robot, " Tipo=", Tipo, " CId=", CId);
-    true.
++error_occurred(Robot, CId, Tipo)[source(S)] : S \== scheduler <- true.
 
 
 /* ============================================================================
