@@ -924,16 +924,22 @@ abs_diff(A, B, D) :- A < B & D = B - A.
     & not claimed_exit(CId) & not intending_exit(CId)
     & deadline_end_ms(EndMs) <-
     .my_name(Me);
-    !estimate_exit_time_ms(Me, ShelfId, EstMs);
-    .time(HH, MM, SS); NowMs = HH*3600000 + MM*60000 + SS*1000;
-    if (NowMs + EstMs <= EndMs) {
-        !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+    /* Guarda 1: solo pujar si hay hueco libre (sin contenedor ni reserva de peer) */
+    if (not exit_zone_has_free_cell(Me)) {
+        .print("[", Me, "] Zona de salida sin hueco accesible — no cojo ", CId)
     } else {
-        .print("[", Me, "] Sin tiempo para entregar ", CId, " antes del deadline — descartado")
+        /* Guarda 2: solo pujar si hay tiempo suficiente */
+        !estimate_exit_time_ms(Me, ShelfId, EstMs);
+        .time(HH, MM, SS); NowMs = HH*3600000 + MM*60000 + SS*1000;
+        if (NowMs + EstMs <= EndMs) {
+            !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+        } else {
+            .print("[", Me, "] Sin tiempo para entregar ", CId, " antes del deadline — descartado")
+        }
     }.
 
-/* Sin deadline_end_ms conocido (broadcast aún no recibido): no bloqueamos,
- * pujamos igual que antes de añadir esta estimación. */
+/* Sin deadline_end_ms conocido (broadcast aún no recibido): no bloqueamos por tiempo,
+ * pero SÍ comprobamos que haya hueco libre antes de coger el contenedor. */
 +!check_exit_pending
     : state(idle) & deadline_active(_)
     & stored_at(CId, ShelfId, W, H, Weight, Type)
@@ -941,7 +947,12 @@ abs_diff(A, B, D) :- A < B & D = B - A.
     & can_handle(W, H, Weight)
     & not claimed_exit(CId) & not intending_exit(CId)
     & not deadline_end_ms(_) <-
-    !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId).
+    .my_name(Me);
+    if (exit_zone_has_free_cell(Me)) {
+        !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+    } else {
+        .print("[", Me, "] Zona de salida sin hueco (sin deadline_end_ms) — no cojo ", CId)
+    }.
 
 +!check_exit_pending <- true.
 
@@ -1084,18 +1095,16 @@ abs_diff(A, B, D) :- A < B & D = B - A.
     /* NO broadcast untell stored_at: la unificación exacta de variables puede
      * fallar en peers. La limpieza en peers se hace exclusivamente via exit_done. */
     +carrying_exit(CId);
-    /* Elegir celda de drop dinámicamente: la primaria del robot si está
-     * libre (caso normal, igual que antes), o la primera alternativa propia
-     * que no tenga ya un contenedor encima. Necesario porque transport solo
-     * retira al FINAL del deadline completo: si este mismo robot ya entregó
-     * antes en esta misma fase, su celda primaria sigue físicamente ocupada
-     * y container_blocked la haría no-walkable para siempre, dejando al
-     * robot atascado con carrying_exit puesto sin poder completar el drop. */
+    /* Elegir celda de drop y RESERVARLA inmediatamente para que otros robots
+     * la vean ocupada antes de llegar físicamente (evita que dos robots
+     * elijan la misma celda y uno quede bloqueado con el contenedor). */
     !pick_exit_drop_cell(Me, EX, EY);
+    !reserve_exit_cell(EX, EY);
     !move_to_exit_drop(EX, EY);
     .wait(100);
     /* Depositar físicamente en la zona de salida */
     drop_at_exit(EX, EY);
+    !release_exit_cell(EX, EY);
     .wait(100);
     .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
     .print("EVENT | time=", T, " | agent=", Me, " | type=container_delivered | data=", CId);
@@ -1130,6 +1139,13 @@ abs_diff(A, B, D) :- A < B & D = B - A.
     .print("[", Me, "] FALLO tarea salida ", CId);
     .send(scheduler, tell, robot_error(Me, CId, exit_failed));
     .broadcast(untell, claimed_exit(CId));
+    /* Liberar reserva de celda si se había elegido ya */
+    if (exit_cell_taken(_, _, Me)) {
+        .findall(pair(X,Y), exit_cell_taken(X, Y, Me), Taken);
+        for (.member(pair(RX,RY), Taken)) {
+            !release_exit_cell(RX, RY)
+        }
+    };
     /* Solo difundimos exit_done (y abolimos stored_at en todos los peers)
      * si el contenedor confirmadamente ya no existe en ninguna shelf local
      * — esa es la causa real de fallos como container_not_in_shelf, y es
@@ -1162,22 +1178,61 @@ abs_diff(A, B, D) :- A < B & D = B - A.
 
 /* ============================================================================
  * ELECCIÓN DE CELDA DE DROP EN ZONA DE SALIDA
- * Primaria si está libre; si no, primera alternativa propia libre.
- * Si TODAS están ocupadas (caso extremo, las 6 celdas de exit_zone llenas),
- * esperamos un momento y reevaluamos en vez de fallar — transport vaciará
- * la zona al terminar el deadline, así que la espera es acotada en el tiempo.
+ * Primaria si está libre (sin contenedor físico NI reservada por otro robot
+ * que ya viene en camino con carrying_exit). Si no, primera alternativa
+ * propia que cumpla lo mismo.
+ * Si TODAS están ocupadas o reservadas, esperamos y reevaluamos — transport
+ * vaciará la zona al terminar el deadline.
+ *
+ * Una celda está "reservada en tránsito" si otro robot (distinto de Me)
+ * tiene carrying_exit activo Y tiene esa celda como su exit_drop_cell_robot
+ * primaria o como primera alternativa libre elegida. Para simplificar sin
+ * acceso a estado interno de peers, usamos una creencia local
+ * exit_cell_reserved(X,Y) que cada robot añade al elegir su celda y elimina
+ * al hacer el drop. Esto permite coordinación ligera sin mensajes extra.
  * ============================================================================ */
+
+/* Marcar/desmarcar reserva de celda de salida — se llama desde execute_exit_task */
+/* (los robots deben llamar a !reserve_exit_cell y !release_exit_cell) */
+
++!reserve_exit_cell(X, Y) <-
+    .my_name(Me);
+    .broadcast(tell, exit_cell_reserved(X, Y, Me)).
+
++!release_exit_cell(X, Y) <-
+    .my_name(Me);
+    .broadcast(tell, exit_cell_released(X, Y, Me)).
+
++exit_cell_reserved(X, Y, Peer)[source(_)] <-
+    +exit_cell_taken(X, Y, Peer);
+    -exit_cell_reserved(X, Y, Peer)[source(_)].
+
++exit_cell_released(X, Y, Peer)[source(_)] <-
+    .abolish(exit_cell_taken(X, Y, Peer));
+    -exit_cell_released(X, Y, Peer)[source(_)].
+
+/* Celda de salida libre: sin contenedor físico encima Y sin reserva de peer */
+exit_drop_free(X, Y) :-
+    not container_at(_, X, Y) & not exit_cell_taken(X, Y, _).
+
+/* Regla derivada: existe al menos una celda libre accesible en la zona de salida
+ * para este robot (primaria o alguna alternativa). Se usa como guarda antes de pujar. */
+exit_zone_has_free_cell(Me) :-
+    exit_drop_cell_robot(Me, PX, PY) & exit_drop_free(PX, PY).
+exit_zone_has_free_cell(Me) :-
+    exit_drop_cells_alt(Me, Alts) & .member(pair(AX, AY), Alts) & exit_drop_free(AX, AY).
+
 +!pick_exit_drop_cell(Me, EX, EY)
-    : exit_drop_cell_robot(Me, PX, PY) & not container_at(_, PX, PY) <-
+    : exit_drop_cell_robot(Me, PX, PY) & exit_drop_free(PX, PY) <-
     EX = PX; EY = PY.
 
 +!pick_exit_drop_cell(Me, EX, EY)
-    : exit_drop_cell_robot(Me, PX, PY) & container_at(_, PX, PY)
+    : exit_drop_cell_robot(Me, PX, PY) & not exit_drop_free(PX, PY)
     & exit_drop_cells_alt(Me, Alts) <-
     !find_free_exit_cell(Alts, EX, EY).
 
 +!find_free_exit_cell([pair(CX,CY) | _], EX, EY)
-    : not container_at(_, CX, CY) <-
+    : exit_drop_free(CX, CY) <-
     EX = CX; EY = CY.
 +!find_free_exit_cell([pair(_,_) | Rest], EX, EY) <-
     !find_free_exit_cell(Rest, EX, EY).
