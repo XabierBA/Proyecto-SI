@@ -122,11 +122,7 @@ delta_t(30000).
     .print("EVENT | time=", T0, " | agent=scheduler | type=output_phase_started | data=", Group);
     !run_deadlines.
 
-/* Ignorar si ya hay un ciclo activo - registrar intento duplicado */
-+no_space(Group)[source(supervisor)] : output_phase_active <-
-    .print("[Scheduler] DESCARTADO: no_space(", Group, ") — ciclo ya activo").
-
-/* Aceptar si no hay ciclo activo - validación ya hecha en primer handler */
+/* Ignorar si ya hay un ciclo activo */
 +no_space(_)[source(supervisor)] <- true.
 
 +!block_group(urgent) <-
@@ -154,6 +150,7 @@ delta_t(30000).
         .broadcast(tell, deadline_active(urgent));
         .print("EVENT | time=", T, " | agent=scheduler | type=deadline_started | data=urgent");
         .send(supervisor, tell, deadline_started(urgent));
+        !broadcast_exit_required(urgent);
         ?delta_t(D);
         EndMs = HH*3600000 + MM*60000 + SS*1000 + D;
         register_deadline("urgent", N, EndMs);
@@ -179,6 +176,7 @@ delta_t(30000).
         .broadcast(tell, deadline_active(nonurgent));
         .print("EVENT | time=", T, " | agent=scheduler | type=deadline_started | data=nonurgent");
         .send(supervisor, tell, deadline_started(nonurgent));
+        !broadcast_exit_required(nonurgent);
         ?delta_t(D);
         Long = D * 2;
         EndMs = HH*3600000 + MM*60000 + SS*1000 + Long;
@@ -194,6 +192,30 @@ delta_t(30000).
     } else {
         .print("[Scheduler] Sin no-urgentes almacenados — saltando deadline no-urgente")
     }.
+
+/* ========== BROADCAST exit_required AL INICIO DE CADA DEADLINE ==========
+ * Emite exit_required(CId, Type, ShelfId) a todos los robots para que
+ * puedan actuar de forma autónoma sin depender del scheduler.
+ * Los robots también buscan en su propio stored_at, así que esto es
+ * un hint complementario para acelerar la reacción inicial.
+ * ========================================================================== */
+
++!broadcast_exit_required(urgent) <-
+    .findall(cid_shelf_type(CId, ShelfId, "urgent"),
+             stored(CId, ShelfId, "urgent"),
+             List);
+    !send_exit_required_list(List).
+
++!broadcast_exit_required(nonurgent) <-
+    .findall(cid_shelf_type(CId, ShelfId, Type),
+             (stored(CId, ShelfId, Type) & (Type == "standard" | Type == "fragile")),
+             List);
+    !send_exit_required_list(List).
+
++!send_exit_required_list([]) <- true.
++!send_exit_required_list([cid_shelf_type(CId, ShelfId, Type) | Rest]) <-
+    .broadcast(tell, exit_required(CId, Type, ShelfId));
+    !send_exit_required_list(Rest).
 
 /* Llamar al agente Transport */
 +!call_transport(Group) <-
@@ -233,9 +255,6 @@ delta_t(30000).
     ?stat_completed(N); -stat_completed(N); +stat_completed(N+1);
     .send(supervisor, tell, task_done(CId, Robot)).
 
-+task_complete(CId, Robot)[source(_)] : not (pending(CId, _, _, _, _) | shelf_assigned(CId, _)) <-
-    .print("[Scheduler] AVISO: task_complete(", CId, ") sin pending/assigned — posible duplicado").
-
 +task_complete(_, _)[source(_)] <- true.
 
 /* Cuando un robot notifica que depositó un contenedor en zona de salida:
@@ -258,9 +277,6 @@ delta_t(30000).
  * Por ahora marcamos at_exit con tipo "unknown" para que Transport lo retire. */
 +container_at_exit(CId)[source(_)] : not stored(CId, _, _) & not at_exit(CId, _) <-
     .print("[Scheduler] AVISO: container_at_exit para ", CId, " sin stored activo — esperando container_delivered").
-
-+container_at_exit(CId)[source(_)] : at_exit(CId, _) <-
-    .print("[Scheduler] AVISO: container_at_exit(", CId, ") — ya registrado").
 
 +container_at_exit(_)[source(_)] <- true.
 

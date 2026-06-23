@@ -1,4 +1,4 @@
-    /*******************************************************************************
+/*******************************************************************************
  * ROBOT COMMON - Lógica Fusionada y Autónoma
  *
  * Este archivo contiene las reglas de comportamiento compartidas por todos
@@ -15,11 +15,27 @@ returning(no).
 
 /* Estanterías con paquetes en proceso - se añaden dinámicamente vía +shelf_in_progress */
 
-/* --- Celdas de salida por robot (evitar colisiones) --- */
+/* --- Celdas de salida por robot (evitar colisiones) ---
+ * Cada robot tiene una celda PRIMARIA (igual reparto que antes, sin cambios
+ * de comportamiento en el caso normal de 1 entrega por robot y deadline) más
+ * celdas ALTERNATIVAS propias. transport solo retira los contenedores al
+ * FINAL del deadline completo (no de forma continua), así que si un mismo
+ * robot entrega 2+ contenedores en el mismo ciclo de salida, su celda
+ * primaria sigue físicamente ocupada por la entrega anterior. Sin una
+ * alternativa, el robot llega a !move_to_exit_drop y el último !go(EX,EY)
+ * nunca puede completarse (container_blocked(EX,EY) hace esa celda no-walkable
+ * para siempre), dejando al robot detenido con carrying_exit puesto
+ * indefinidamente. Las 6 celdas de is_exit_zone (X 0-2, Y 0-1) se reparten
+ * en 4 primarias + 2 compartidas como alternativa de desbordamiento. */
 exit_drop_cell_robot(robot_light, 0, 0).
 exit_drop_cell_robot(robot_medium, 1, 0).
 exit_drop_cell_robot(robot_heavy, 2, 0).
 exit_drop_cell_robot(robot_heavy_2, 2, 1).
+
+exit_drop_cells_alt(robot_light,    [pair(0,1), pair(1,1), pair(2,1), pair(1,0), pair(2,0)]).
+exit_drop_cells_alt(robot_medium,   [pair(1,1), pair(0,1), pair(2,1), pair(0,0), pair(2,0)]).
+exit_drop_cells_alt(robot_heavy,    [pair(2,1), pair(1,1), pair(0,1), pair(0,0), pair(1,0)]).
+exit_drop_cells_alt(robot_heavy_2,  [pair(2,0), pair(1,0), pair(0,0), pair(0,1), pair(1,1)]).
 
 /* --- Mapa de estanterías --- */
 shelf_cell(10,2). shelf_cell(11,2). shelf_cell(10,3). shelf_cell(11,3).
@@ -72,13 +88,15 @@ blocked(X,Y) :- is_class_zone(X,Y).
 
 container_blocked(X,Y) :- container_at(_, X, Y).
 peer_blocks(X,Y) :- peer_position(_, X, Y).
-/* Durante la fase de salida (current_exit activo) ignoramos peer_blocks:
- * los robots siguen su ruta directa y si hay choque, error(conflict, _)
- * dispara reintento sin recalcular rutas alternativas. Esto evita la
- * oscilación que se produce cuando un peer estático bloquea una celda
- * intermedia y peer_blocks fuerza al robot a buscar caminos absurdos. */
-walkable(X,Y) :- current_exit(_) & not blocked(X,Y) & not container_blocked(X,Y).
-walkable(X,Y) :- not current_exit(_) & not blocked(X,Y) & not container_blocked(X,Y) & not peer_blocks(X,Y).
+/* Regla única: walkable siempre respeta peer_blocks, igual durante el ciclo
+ * de salida (current_exit activo) que en el ciclo normal de entrada. La
+ * relajación anterior (ignorar peer_blocks durante current_exit) provocaba
+ * que dos robots en fase de salida no se "vieran" entre sí, convergieran en
+ * la misma celda del pasillo fijo de salida y quedaran reintentando el mismo
+ * paso en bucle tras error(conflict,_) — eso es lo que se percibía como
+ * movimiento errático. !go ya sabe replanificar alrededor de un peer gracias
+ * a last_pos, así que no hace falta esta excepción. */
+walkable(X,Y) :- not blocked(X,Y) & not container_blocked(X,Y) & not peer_blocks(X,Y).
 
 /* --- Configuración local de estanterías --- */
 /* shelf_local(Id, MaxW, MaxV, UsedW, UsedV) */
@@ -121,21 +139,6 @@ shelf_fits_local(ShelfId, Weight, Area, Type) :-
     Weight + UsedW <= MaxW & Area + UsedV <= MaxV.
 
 /* ============================================================================
- * PREDICADOS AUXILIARES — TIPOS DE CONTENEDORES
- * ============================================================================ */
-
-/* Tipos urgentes */
-is_urgent_type("urgent").
-
-/* Tipos no urgentes */
-is_nonurgent_type("standard").
-is_nonurgent_type("fragile").
-
-/* Verificación genérica si un tipo es válido para cualquier grupo */
-is_valid_type(Type) :- is_urgent_type(Type).
-is_valid_type(Type) :- is_nonurgent_type(Type).
-
-/* ============================================================================
  * INICIO Y BUCLE PRINCIPAL
  * ============================================================================ */
 
@@ -149,12 +152,20 @@ is_valid_type(Type) :- is_nonurgent_type(Type).
     .broadcast(tell, peer_at_pos(Me, IX, IY));
     !main_loop.
 
-/* Durante deadline activo con tarea pendiente: ciclo de salida + un paso de retorno */
+/* Durante deadline activo con tarea pendiente: ciclo de salida + un paso de retorno.
+ * IMPORTANTE: !return_step solo debe correr si el robot sigue realmente libre
+ * (idle y sin current_exit asignado). check_exit_pending puede ganar una
+ * subasta y lanzar !execute_exit_task como intención independiente que pasa
+ * el robot a busy; si !return_step se ejecuta igualmente en ese instante,
+ * ambos planes escriben/borran last_pos a la vez y el robot zigzaguea.
+ * Por eso el paso de retorno se condiciona aquí, no solo dentro de return_step. */
 +!main_loop : state(idle) & deadline_active(_) & has_exit_work <-
     .abolish(bid_attempted(_));
     !check_exit_pending;
     .wait(100);
-    !return_step;
+    if (state(idle) & not current_exit(_)) {
+        !return_step
+    };
     !main_loop.
 
 /* Durante deadline activo SIN trabajo: esperar en base sin moverse */
@@ -162,12 +173,17 @@ is_valid_type(Type) :- is_nonurgent_type(Type).
     .wait(200);
     !main_loop.
 
-/* Sin deadline: ciclo normal de entrada y retorno a base */
+/* Sin deadline: ciclo normal de entrada y retorno a base.
+ * Misma precaución que en el ciclo de salida: check_pending puede ganar una
+ * subasta y disparar !execute_task (pasa a busy) como intención aparte;
+ * solo lanzamos el paso de retorno si seguimos realmente idle. */
 +!main_loop : state(idle) <-
     .abolish(bid_attempted(_));
     !check_pending;
     .wait(100);
-    !return_to_base_step;
+    if (state(idle)) {
+        !return_to_base_step
+    };
     !main_loop.
 
 +!main_loop : state(busy) <- .wait(200); !main_loop.
@@ -178,7 +194,7 @@ has_exit_work :-
     deadline_active(urgent) & stored_at(CId, _, _, _, _, "urgent") & not claimed_exit(CId).
 has_exit_work :-
     deadline_active(nonurgent) & stored_at(CId, _, _, _, _, Type)
-    & is_nonurgent_type(Type) & not claimed_exit(CId).
+    & (Type == "standard" | Type == "fragile") & not claimed_exit(CId).
 
 /* Volver a base paso a paso. En cada paso comprueba si está idle y no en base.
  * Si llega un pending compatible, check_pending lo cogerá en la siguiente iter
@@ -209,7 +225,7 @@ has_exit_work :-
     : state(busy) & not deadline_active(_) & can_handle(W, H, Weight)
     & not claimed(CId) & not intending(CId)
     & current_container(OldCId) & not carrying(OldCId)
-    & current_task_info(OldCId, _, _, _, OldType) & is_nonurgent_type(OldType)
+    & current_task_info(OldCId, _, _, _, OldType) & OldType \== "urgent"
     & not preempt_pending(_)
     & not no_shelf_available(CId) <-
     .my_name(Me);
@@ -337,13 +353,29 @@ has_exit_work :-
 +!resolve_bid(CId, _, _, _, _) <-
     -intending(CId).
 
-/* Fallo de find_shelf_nearest (sin candidatas válidas): notificar supervisor */
+/* Fallo de find_shelf_nearest (sin candidatas válidas): notificar supervisor
+ * Y A TODOS LOS PEERS. Sin el broadcast, no_shelf_available(CId) quedaba
+ * como creencia puramente local: este robot dejaba de pujar (correctamente),
+ * pero los demás seguían viendo pending_container(CId,...) sin esta guarda,
+ * así que seguían pujando entre ellos indefinidamente — "ganando" la subasta
+ * contra un robot que ya se había retirado para siempre, sin que nadie
+ * llegara nunca a ejecutar la tarea. Eso bloqueaba en la práctica el avance
+ * del sistema mientras el contenedor seguía sin estantería disponible. */
 -!resolve_bid(CId, _, _, _, Type) <-
     .my_name(Me);
     -intending(CId);
     .print("[", Me, "] Sin estantería para ", CId, " (", Type, ") — notificando supervisor");
     .send(supervisor, tell, no_fit(CId, Type));
-    +no_shelf_available(CId).
+    +no_shelf_available(CId);
+    .broadcast(tell, no_shelf_available(CId)).
+
+/* Recepción del aviso de un peer: igual que localmente, dejamos de pujar
+ * por este CId. .broadcast no vuelve al emisor, pero el emisor ya se marcó
+ * la creencia local en la línea de arriba, así que no hace falta autolimpieza
+ * aquí (a diferencia del caso de exit_done, esta creencia no se borra nunca
+ * salvo al reiniciar deadline — ver .abolish(no_shelf_available(_)) en
+ * +deadline_active). */
++no_shelf_available(CId)[source(_)] <- true.
 /* Chequeo activo: retirarse si hay un rival con menor delay en el BB */
 +!check_rivals(CId, Me, MyD)
     : intend(CId, Rival) & peer_bid_delay(Rival, RD) & RD < MyD <-
@@ -478,13 +510,8 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .abolish(shelf_blocked(_));
     -+state(idle).
 
-/* drop_at falló en la nueva estantería → +error(shelf_full,_) lo gestionará.
-   Se registra el evento para auditoría antes de que sea procesado por el manejador de error. */
--!try_deliver_to_next(CId, _, _, _, _) : error(shelf_full, _) & target_shelf(_) <-
-    .my_name(Me);
-    ?target_shelf(FullShelf);
-    .print("[ERROR TRACE | ", Me, "] Fallo entrega a alternativa para CId=", CId, " en ", FullShelf, " (shelf_full) - manejador de error procesará recuperación");
-    true.
+/* drop_at falló en la nueva estantería → +error(shelf_full,_) lo gestionará */
+-!try_deliver_to_next(CId, _, _, _, _) : error(shelf_full, _) & target_shelf(_) <- true.
 
 /* find_shelf_alt_local falló (todas agotadas) → abortar y volver a base */
 -!try_deliver_to_next(CId, W, H, Weight, _) <-
@@ -596,196 +623,70 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 /* Actualizar capacidad usada de una estantería tras entregar */
 +!update_shelf_used(ShelfId, Weight, Area) <- true. /* reserva ya hecha al reclamar */
 
-/* ============================================================================
- * ARQUITECTURA BDI: +!execute_task EN SUBFASES ATÓMICAS
- * ============================================================================
- * Cada subfase es un plan con contexto de selección propio (no if() en cuerpo).
- * La observación del mundo ocurre al ELEGIR el plan, no durante su ejecución.
- * Si una subfase falla, su manejador -! identifica la fase y delega recuperación.
- * ============================================================================ */
-
-/* ---- Planes auxiliares BDI: recuperación por contexto ---- */
-+!execute_task_release_reservation(CId, ShelfId) : current_task_info(CId, W, H, Weight, _) <-
-    !release_shelf(ShelfId, Weight, W*H).
-
-+!execute_task_release_reservation(_, _) <- true.
-
-+!execute_task_abort_before_pickup(CId, ShelfId, Reason) <-
-    .my_name(Me);
-    !execute_task_release_reservation(CId, ShelfId);
-    .send(scheduler, tell, robot_error(Me, CId, Reason));
-    .broadcast(untell, claimed(CId));
-    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-    -current_task_info(CId, _, _, _, _);
-    .abolish(shelf_blocked(_));
-    -+state(idle).
-
-+!execute_task_abort_carrying(CId, ShelfId, Reason) <-
-    .my_name(Me);
-    !execute_task_release_reservation(CId, ShelfId);
-    .send(scheduler, tell, robot_error(Me, CId, Reason));
-    .broadcast(untell, claimed(CId));
-    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-    -current_task_info(CId, _, _, _, _);
-    -carrying(CId);
-    .abolish(shelf_blocked(_));
-    -+state(idle).
-
-+!execute_task_abort_missing_container(CId, ShelfId) : current_task_info(CId, W, H, Weight, _) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-1] Container ", CId, " ya no existe — limpiando");
-    !release_shelf(ShelfId, Weight, W*H);
-    .broadcast(untell, claimed(CId));
-    .broadcast(tell, container_done(CId));
-    .abolish(pending_container(CId, _, _, _, _));
-    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-    -current_task_info(CId, _, _, _, _);
-    .abolish(shelf_blocked(_));
-    -+state(idle);
-    .fail.
-
-+!execute_task_abort_missing_container(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-1] Container ", CId, " ya no existe — limpiando");
-    .broadcast(untell, claimed(CId));
-    .broadcast(tell, container_done(CId));
-    .abolish(pending_container(CId, _, _, _, _));
-    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-    -current_task_info(CId, _, _, _, _);
-    .abolish(shelf_blocked(_));
-    -+state(idle);
-    .fail.
-
-+!execute_task_abort_preempt(CId, ShelfId) : current_task_info(CId, W, H, Weight, _) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-2B] PREEMPT detectado: abortando ", CId);
-    !release_shelf(ShelfId, Weight, W*H);
-    .broadcast(untell, claimed(CId));
-    .abolish(preempt_pending(_));
-    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-    -current_task_info(CId, _, _, _, _);
-    .abolish(shelf_blocked(_));
-    -+state(idle);
-    .fail.
-
-+!execute_task_abort_preempt(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-2B] PREEMPT detectado: abortando ", CId);
-    .broadcast(untell, claimed(CId));
-    .abolish(preempt_pending(_));
-    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
-    -current_task_info(CId, _, _, _, _);
-    .abolish(shelf_blocked(_));
-    -+state(idle);
-    .fail.
-
-/* Punto de entrada: delega a subfases (sin lógica secuencial en el cuerpo) */
 +!execute_task(CId, ShelfId) <-
     .my_name(Me);
-    .print("[", Me, "] [INIT] execute_task inicio para ", CId);
-    !execute_task_validate_container(CId, ShelfId).
-
-/* ---- SUBFASE 1: Validar que el contenedor existe ---- */
-+!execute_task_validate_container(CId, ShelfId) : container_at(CId, CX, CY) <-
-    .my_name(Me);
+    .print("[", Me, "] execute_task ", CId, " paso 1 get_container_info");
     get_container_info(CId);
     .wait(100);
-    .print("[", Me, "] [PHASE-1] Container validado en (", CX, ",", CY, ")");
-    !execute_task_navigate_pickup(CId, ShelfId, CX, CY).
-
-+!execute_task_validate_container(CId, ShelfId) : not container_at(CId, _, _) <-
-    !execute_task_abort_missing_container(CId, ShelfId).
-
--!execute_task_validate_container(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-1 ERROR] Validación contenedor falló para ", CId);
-    !execute_task_abort_before_pickup(CId, ShelfId, container_validation_failed).
-
-/* ---- SUBFASE 2: Navegar al contenedor ---- */
-+!execute_task_navigate_pickup(CId, ShelfId, CX, CY) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-2] Navegando a pickup (", CX, ",", CY, ")");
+    .print("[", Me, "] execute_task ", CId, " paso 2 ?container_at");
+    if (not container_at(CId, _, _)) {
+        .print("[", Me, "] container ", CId, " ya no existe — limpiando");
+        ?current_task_info(CId, W, H, Weight, Type);
+        !release_shelf(ShelfId, Weight, W*H);
+        .broadcast(untell, claimed(CId));
+        .broadcast(tell, container_done(CId));
+        .abolish(pending_container(CId, _, _, _, _));
+        -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+        -current_task_info(CId, _, _, _, _);
+        -+state(idle);
+        .fail
+    };
+    ?container_at(CId, CX, CY);
+    .print("[", Me, "] execute_task ", CId, " paso 3 go_adjacent ", CX, ",", CY);
     !go_adjacent(CX, CY);
-    .print("[", Me, "] [PHASE-2] Navegación completada");
-    !execute_task_check_preemption(CId, ShelfId).
-
--!execute_task_navigate_pickup(CId, ShelfId, CX, CY) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-2 ERROR] Navegación a pickup falló para ", CId);
-    !execute_task_abort_before_pickup(CId, ShelfId, navigation_to_pickup_failed).
-
-/* ---- SUBFASE 2B: Verificar preempción antes de recoger ---- */
-+!execute_task_check_preemption(CId, ShelfId) : preempt_pending(_) <-
-    !execute_task_abort_preempt(CId, ShelfId).
-
-+!execute_task_check_preemption(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-2B] Sin preempción, continuando");
-    !execute_task_do_pickup(CId, ShelfId).
-
-/* ---- SUBFASE 3: Recoger el contenedor ---- */
-+!execute_task_do_pickup(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-3] Recogiendo contenedor ", CId);
+    /* Antes del pickup, comprobar si hay flag de preempción por urgente */
+    if (preempt_pending(_)) {
+        .print("[", Me, "] PREEMPT activado: abortando ", CId);
+        ?current_task_info(CId, W, H, Weight, Type);
+        !release_shelf(ShelfId, Weight, W*H);
+        .broadcast(untell, claimed(CId));
+        -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+        -current_task_info(CId, _, _, _, _);
+        .abolish(preempt_pending(_));
+        -+state(idle);
+        .fail
+    };
+    .print("[", Me, "] execute_task ", CId, " paso 4 pickup");
     pickup(CId);
     +carrying(CId);
     .wait(100);
-    .print("[", Me, "] [PHASE-3] Contenedor recogido exitosamente");
-    !execute_task_navigate_delivery(CId, ShelfId).
-
--!execute_task_do_pickup(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-3 ERROR] Pickup falló para ", CId);
-    !execute_task_abort_before_pickup(CId, ShelfId, pickup_failed).
-
-/* ---- SUBFASE 4: Navegar a la estantería de entrega ---- */
-+!execute_task_navigate_delivery(CId, ShelfId) <-
-    .my_name(Me);
+    .print("[", Me, "] execute_task ", CId, " paso 5 get_shelf_dest");
     !get_shelf_dest(ShelfId, SX, SY);
-    .print("[", Me, "] [PHASE-4] Navegando a entrega (", SX, ",", SY, ")");
+    .print("[", Me, "] execute_task ", CId, " paso 6 go ", SX, ",", SY);
     !go(SX, SY);
-    .print("[", Me, "] [PHASE-4] Navegación a entrega completada");
-    !execute_task_do_delivery(CId, ShelfId).
-
--!execute_task_navigate_delivery(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-4 ERROR] Navegación a entrega falló para ", CId);
-    !execute_task_abort_carrying(CId, ShelfId, navigation_to_delivery_failed).
-
-/* ---- SUBFASE 5: Validar y entregar el contenedor ---- */
-+!execute_task_do_delivery(CId, ShelfId) : current_task_info(CId, W, H, Weight, Type) & shelf_allows_type_local(ShelfId, Type) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-5] Entregando en ", ShelfId, " (tipo válido: ", Type, ")");
+    .print("[", Me, "] execute_task ", CId, " paso 7 drop_at");
+    ?current_task_info(CId, W, H, Weight, Type);
+    /* VALIDACIÓN CRÍTICA: verificar que la estantería acepta este tipo */
+    if (not shelf_allows_type_local(ShelfId, Type)) {
+        .print("[", Me, "] ERROR CRÍTICO: ", ShelfId, " NO acepta tipo ", Type, " para ", CId);
+        !release_shelf(ShelfId, Weight, W*H);
+        .broadcast(untell, claimed(CId));
+        .send(scheduler, tell, robot_error(Me, CId, wrong_shelf_type));
+        -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+        -current_task_info(CId, _, _, _, _);
+        -carrying(CId);
+        .abolish(shelf_blocked(_));
+        -+state(idle);
+        .fail
+    };
     drop_at(ShelfId);
     .wait(100);
-    .print("[", Me, "] [PHASE-5] Entrega exitosa");
-    !execute_task_cleanup_success(CId, ShelfId, W, H, Weight, Type).
-
-+!execute_task_do_delivery(CId, ShelfId) : current_task_info(CId, W, H, Weight, Type) & not shelf_allows_type_local(ShelfId, Type) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-5 ERROR] Estantería ", ShelfId, " NO acepta tipo ", Type, " para ", CId);
-    !execute_task_abort_carrying(CId, ShelfId, wrong_shelf_type);
-    .fail.
-
--!execute_task_do_delivery(CId, ShelfId) : error(shelf_full, _) <-
-    .my_name(Me);
-    .print("[ERROR TRACE | ", Me, "] [PHASE-5] Estantería llena para ", CId, " en ", ShelfId, " - manejador de error procesará");
-    true.
-
--!execute_task_do_delivery(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-5 ERROR] Entrega falló para ", CId);
-    !execute_task_abort_carrying(CId, ShelfId, delivery_failed).
-
-/* ---- SUBFASE 6: Limpieza y finalización ---- */
-+!execute_task_cleanup_success(CId, ShelfId, W, H, Weight, Type) <-
-    .my_name(Me);
-    .print("[", Me, "] [PHASE-6] Limpieza y confirmación para ", CId);
+    ?current_task_info(CId, W, H, Weight, Type);
     !update_shelf_used(ShelfId, Weight, W*H);
     +stored_at(CId, ShelfId, W, H, Weight, Type);
     .broadcast(tell, stored_at(CId, ShelfId, W, H, Weight, Type));
     .send(scheduler, tell, task_complete(CId, Me));
-    .print("[", Me, "] ", CId, " -> ", ShelfId, " [COMPLETE]");
+    .print("[", Me, "] ", CId, " -> ", ShelfId, " OK");
     .broadcast(untell, claimed(CId));
     .broadcast(tell, container_done(CId));
     .abolish(pending_container(CId, _, _, _, _));
@@ -795,36 +696,34 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .abolish(shelf_blocked(_));
     -+state(idle).
 
--!execute_task_cleanup_success(CId, ShelfId, _, _, _, _) <-
+/* Si la causa es shelf_full: no limpiar nada, el handler de error lo gestiona */
+-!execute_task(CId, ShelfId) : error(shelf_full, _) <- true.
+
+/* Cualquier otro fallo: liberar reserva y limpiar */
+-!execute_task(CId, ShelfId) <-
     .my_name(Me);
-    .print("[", Me, "] [PHASE-6 ERROR] Limpieza falló para ", CId);
-    !execute_task_abort_carrying(CId, ShelfId, cleanup_failed).
+    .print("[", Me, "] FALLO tarea ", CId);
+    if (current_task_info(CId, W, H, Weight, _)) {
+        !release_shelf(ShelfId, Weight, W*H)
+    };
+    .send(scheduler, tell, robot_error(Me, CId, execution_failed));
+    .broadcast(untell, claimed(CId));
+    -claimed(CId); -current_container(CId); -target_shelf(ShelfId);
+    -current_task_info(CId, _, _, _, _);
+    -carrying(CId);
+    .abolish(shelf_blocked(_));
+    -+state(idle).
 
 +!go_adjacent(CX, CY) : walkable(CX, CY+1) <- !go(CX, CY+1).
 +!go_adjacent(CX, CY) : walkable(CX+1, CY) <- !go(CX+1, CY).
 +!go_adjacent(CX, CY) : walkable(CX-1, CY) <- !go(CX-1, CY).
 +!go_adjacent(CX, CY) : walkable(CX, CY-1) <- !go(CX, CY-1).
-+!go_adjacent(CX, CY) : not go_adjacent_attempts(_, _) <-
-    +go_adjacent_attempts(CX, CY, 0);
-    .wait(500);
-    !go_adjacent(CX, CY).
-+!go_adjacent(CX, CY) : go_adjacent_attempts(CX, CY, N) & N < 5 <-
-    -go_adjacent_attempts(CX, CY, N);
-    N1 = N + 1;
-    +go_adjacent_attempts(CX, CY, N1);
-    .wait(500);
-    !go_adjacent(CX, CY).
-+!go_adjacent(CX, CY) : go_adjacent_attempts(_, _, _) <-
-    .my_name(Me);
-    .abolish(go_adjacent_attempts(_, _, _));
-    .print("[", Me, "] FALLO: go_adjacent(", CX, ",", CY, ") máx intentos alcanzado");
-    .fail.
++!go_adjacent(CX, CY) <- .wait(500); !go_adjacent(CX, CY).
 
 /* Anti-oscilación: last_pos registra la celda de origen antes de cada paso.
  * Las reglas excluyen last_pos como destino inmediato, evitando A->B->A.
- * Fallback: si todo está bloqueado o apunta a last_pos, borrar y esperar 1s.
- * Contador de intentos: máx 10 intentos para evitar recursión infinita. */
-+!go(TX, TY) : position(TX, TY) <- .abolish(last_pos(_,_)); .abolish(go_attempts(_,_,_)).
+ * Fallback: si todo está bloqueado o apunta a last_pos, borrar y esperar 1s. */
++!go(TX, TY) : position(TX, TY) <- .abolish(last_pos(_,_)).
 +!go(TX, TY) : position(MX, MY) & MY < TY & walkable(MX, MY+1) & not last_pos(MX, MY+1) <- !do_step(MX, MY, MX, MY+1, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MY > TY & walkable(MX, MY-1) & not last_pos(MX, MY-1) <- !do_step(MX, MY, MX, MY-1, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX < TX & walkable(MX+1, MY) & not last_pos(MX+1, MY) <- !do_step(MX, MY, MX+1, MY, TX, TY).
@@ -833,24 +732,7 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 +!go(TX, TY) : position(MX, MY) & MY \== TY & walkable(MX+1, MY) & not last_pos(MX+1, MY) <- !do_step(MX, MY, MX+1, MY, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY-1) & not last_pos(MX, MY-1) <- !do_step(MX, MY, MX, MY-1, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY+1) & not last_pos(MX, MY+1) <- !do_step(MX, MY, MX, MY+1, TX, TY).
-+!go(TX, TY) : not go_attempts(_, _, _) <-
-    .abolish(last_pos(_,_));
-    +go_attempts(TX, TY, 0);
-    .wait(1000);
-    !go(TX, TY).
-+!go(TX, TY) : go_attempts(TX, TY, N) & N < 10 <-
-    -go_attempts(TX, TY, N);
-    N1 = N + 1;
-    +go_attempts(TX, TY, N1);
-    .abolish(last_pos(_,_));
-    .wait(1000);
-    !go(TX, TY).
-+!go(TX, TY) : go_attempts(_, _, _) <-
-    .my_name(Me);
-    .abolish(go_attempts(_, _, _));
-    .abolish(last_pos(_,_));
-    .print("[", Me, "] FALLO: go(", TX, ",", TY, ") máx intentos alcanzado");
-    .fail.
++!go(TX, TY) <- .abolish(last_pos(_,_)); .wait(1000); !go(TX, TY).
 
 +!do_step(FX, FY, NX, NY, TX, TY) <-
     .abolish(last_pos(_,_)); +last_pos(FX, FY);
@@ -902,65 +784,31 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     -target_shelf(FullShelf);
     !try_deliver_to_next(CId, W, H, Weight, Type).
 
-/* Guardia de seguridad: si no hay target_shelf en BB, ignorar y registrar */
-+error(shelf_full, _) <-
-    .my_name(Me);
-    .print("[", Me, "] ERROR: shelf_full sin contexto (target_shelf no disponible)");
-    .send(scheduler, tell, robot_error(Me, unknown, shelf_full_no_context));
-    -+state(idle).
+/* Guardia de seguridad: si no hay target_shelf en BB, ignorar sin disparar handler genérico */
++error(shelf_full, _) <- true.
 
 +error(too_far, _)           : state(busy) <- .wait(300); ?current_container(CId); ?target_shelf(Sh); !execute_task(CId, Sh).
-/* Durante fase de salida: esperar y reintentar la tarea de salida en lugar de ignorar */
-+error(conflict, _) : current_exit(CId) & current_exit_info(CId, W, H, Weight, Type, ShelfId) <-
+/* Durante fase de salida: un conflicto puntual de celda NO debe relanzar
+ * toda la tarea desde el principio. Si el robot ya recogió el contenedor
+ * (carrying_exit puesto), relanzar !execute_exit_task volvería a intentar
+ * pickup_from_shelf sobre un stored_at que ya no existe y abortaría la
+ * entrega aunque el robot lo llevara físicamente encima. !go ya resuelve
+ * el paso bloqueado usando last_pos (espera/rodea), así que basta con
+ * esperar brevemente: la propia intención !go en curso reintentará sola. */
++error(conflict, _) : current_exit(CId) & carrying_exit(CId) <-
     .my_name(Me);
-    .print("[", Me, "] Conflicto en salida — reintentando tarea salida ", CId);
+    .print("[", Me, "] Conflicto en salida (con paquete) — esperando paso libre ", CId);
+    .wait(300).
+/* Si aún no ha recogido el contenedor (yendo hacia la shelf), sí es seguro
+ * relanzar la tarea completa: no hay estado físico que pueda duplicarse. */
++error(conflict, _) : current_exit(CId) & current_exit_info(CId, W, H, Weight, Type, ShelfId) & not carrying_exit(CId) <-
+    .my_name(Me);
+    .print("[", Me, "] Conflicto en salida (sin paquete) — reintentando tarea salida ", CId);
     .wait(300);
     !execute_exit_task(CId, W, H, Weight, Type, ShelfId).
-
-/* Conflicto fuera de fase de salida: registrar y recuperarse */
-+error(conflict, _) <-
-    .my_name(Me);
-    ?current_container(CId);
-    .print("[", Me, "] ERROR conflict durante tarea entrada para ", CId);
-    .send(scheduler, tell, robot_error(Me, CId, conflict_during_entry));
-    .abolish(conflict_count(_));
-    .wait(500);
-    if (current_container(CId)) {
-        .print("[", Me, "] Reintentando tarea entrada tras conflicto");
-        ?target_shelf(Sh);
-        !execute_task(CId, Sh)
-    } else {
-        -+state(idle)
-    }.
-/* Ruta bloqueada: registrar e intentar recalcular */
-+error(route_blocked, _) <-
-    .my_name(Me);
-    ?current_container(CId);
-    if (current_container(CId)) {
-        .print("[", Me, "] ERROR route_blocked para ", CId, " - reintentando");
-        .send(scheduler, tell, robot_error(Me, CId, route_blocked));
-        .wait(500);
-        ?target_shelf(Sh);
-        !execute_task(CId, Sh)
-    } else {
-        .print("[", Me, "] ERROR route_blocked sin tarea activa");
-        .send(scheduler, tell, robot_error(Me, unknown, route_blocked_idle));
-        -+state(idle)
-    }.
-
-/* Contenedor bloqueando: esperar y reintentar con registro */
-+error(container_blocking, _) <-
-    .my_name(Me);
-    .print("[", Me, "] ERROR container_blocking - esperando y reintentando");
-    .wait(500);
-    if (current_container(CId2)) {
-        ?target_shelf(Sh);
-        !execute_task(CId2, Sh)
-    } else {
-        .print("[", Me, "] container_blocking pero sin tarea activa");
-        .send(scheduler, tell, robot_error(Me, unknown, container_blocking_idle));
-        -+state(idle)
-    }.
++error(conflict, _)          <- true.
++error(route_blocked, _)     <- true.
++error(container_blocking, _) <- .wait(300).
 +error(Tipo, _) <- .my_name(Me); .send(scheduler, tell, robot_error(Me, none, Tipo)); -+state(idle).
 
 /* ============================================================================
@@ -991,26 +839,8 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     -+position(X,Y);
     /* Movimiento exitoso → reset contador de conflictos consecutivos */
     .abolish(conflict_count(_));
-    /* Optimización: solo broadcast si hay cambio significativo de posición (>2 celdas)
-     * o si es el primer broadcast (evita 80 msgs en un camino de 20 pasos) */
-    !broadcast_position_if_needed(X, Y).
-
-+!broadcast_position_if_needed(X, Y)
-    : not last_broadcast_pos(_, _) <-
-    /* Primer movimiento: siempre broadcast */
     .my_name(Me);
-    +last_broadcast_pos(X, Y);
     .broadcast(tell, peer_at_pos(Me, X, Y)).
-
-+!broadcast_position_if_needed(X, Y)
-    : last_broadcast_pos(LX, LY) & (X-LX)*(X-LX) + (Y-LY)*(Y-LY) > 4 <-
-    /* Distancia > 2 celdas: actualizar broadcast */
-    .my_name(Me);
-    -last_broadcast_pos(LX, LY);
-    +last_broadcast_pos(X, Y);
-    .broadcast(tell, peer_at_pos(Me, X, Y)).
-
-+!broadcast_position_if_needed(_, _) <- true.
 
 /* Recibir y mantener posiciones de los peers (sobreescribiendo la anterior).
  * Filtramos el caso en que el peer somos nosotros mismos para no bloquearnos. */
@@ -1039,9 +869,9 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
 
 /* Tipo del contenedor pertenece al deadline activo */
 type_in_active_deadline(Type) :-
-    deadline_active(urgent)    & is_urgent_type(Type).
+    deadline_active(urgent)    & Type == "urgent".
 type_in_active_deadline(Type) :-
-    deadline_active(nonurgent) & is_nonurgent_type(Type).
+    deadline_active(nonurgent) & (Type == "standard" | Type == "fragile").
 
 /* Reacción a exit_required: NO disparamos !bid_exit_if_free aquí.
  * Si lo hiciéramos, crearíamos una intención paralela al main_loop que
@@ -1058,13 +888,72 @@ type_in_active_deadline(Type) :-
  * causaba que el robot pujase por todos los stored_at simultáneamente
  * antes de que +state(busy) se propagara, ganando 5 subastas a la vez
  * sin poder ejecutar ninguna (el robot solo puede llevar uno). */
+
+/* ============================================================================
+ * ESTIMACIÓN DE TIEMPO DE ENTREGA — evita coger contenedores que no se
+ * podrán entregar antes de que termine el deadline activo.
+ * Distancia Manhattan: robot -> acceso de la estantería (la entrada más
+ * cercana) -> celda de salida del robot. Tiempo = distancia * step_wait,
+ * con un margen de seguridad del 20% para colisiones/esperas por peers.
+ * Si no tenemos deadline_end_ms (p.ej. el broadcast aún no llegó), NO
+ * bloqueamos — es mejor intentarlo que quedarse parado por falta de dato.
+ * Nota: abs manual vía condicionales, no se usa math.abs por no estar
+ * confirmada su disponibilidad en este entorno (ver warnings de
+ * ClassNotFoundException para otras funciones de librería en el log). */
+abs_diff(A, B, D) :- A >= B & D = A - B.
+abs_diff(A, B, D) :- A < B & D = B - A.
+
++!estimate_exit_time_ms(Me, ShelfId, EstMs) <-
+    ?position(RX, RY);
+    ?shelf_access_north(ShelfId, NX, NY); ?shelf_access_south(ShelfId, SX, SY);
+    abs_diff(RX, NX, DXN); abs_diff(RY, NY, DYN); DistN = DXN + DYN;
+    abs_diff(RX, SX, DXS); abs_diff(RY, SY, DYS); DistS = DXS + DYS;
+    if (DistN <= DistS) { DistToShelf = DistN; AX = NX; AY = NY }
+    else { DistToShelf = DistS; AX = SX; AY = SY };
+    ?exit_drop_cell_robot(Me, EX, EY);
+    abs_diff(AX, EX, DXB); abs_diff(AY, EY, DYB); DistBack = DXB + DYB;
+    TotalCells = DistToShelf + DistBack;
+    ?step_wait(SW);
+    EstMs = (TotalCells * SW) * 1.2.
+
 +!check_exit_pending
     : state(idle) & deadline_active(_)
     & stored_at(CId, ShelfId, W, H, Weight, Type)
     & type_in_active_deadline(Type)
     & can_handle(W, H, Weight)
-    & not claimed_exit(CId) & not intending_exit(CId) <-
-    !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId).
+    & not claimed_exit(CId) & not intending_exit(CId)
+    & deadline_end_ms(EndMs) <-
+    .my_name(Me);
+    /* Guarda 1: solo pujar si hay hueco libre (sin contenedor ni reserva de peer) */
+    if (not exit_zone_has_free_cell(Me)) {
+        .print("[", Me, "] Zona de salida sin hueco accesible — no cojo ", CId)
+    } else {
+        /* Guarda 2: solo pujar si hay tiempo suficiente */
+        !estimate_exit_time_ms(Me, ShelfId, EstMs);
+        .time(HH, MM, SS); NowMs = HH*3600000 + MM*60000 + SS*1000;
+        if (NowMs + EstMs <= EndMs) {
+            !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+        } else {
+            .print("[", Me, "] Sin tiempo para entregar ", CId, " antes del deadline — descartado")
+        }
+    }.
+
+/* Sin deadline_end_ms conocido (broadcast aún no recibido): no bloqueamos por tiempo,
+ * pero SÍ comprobamos que haya hueco libre antes de coger el contenedor. */
++!check_exit_pending
+    : state(idle) & deadline_active(_)
+    & stored_at(CId, ShelfId, W, H, Weight, Type)
+    & type_in_active_deadline(Type)
+    & can_handle(W, H, Weight)
+    & not claimed_exit(CId) & not intending_exit(CId)
+    & not deadline_end_ms(_) <-
+    .my_name(Me);
+    if (exit_zone_has_free_cell(Me)) {
+        !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+    } else {
+        .print("[", Me, "] Zona de salida sin hueco (sin deadline_end_ms) — no cojo ", CId)
+    }.
+
 +!check_exit_pending <- true.
 
 /* Subasta de salida: reaprovecha el delay normal */
@@ -1155,170 +1044,203 @@ type_in_active_deadline(Type) :-
  *   2) simular pickup (liberar capacidad y eliminar stored_at)
  *   3) ir a la zona de salida (celda 1,1 — pasable porque state(busy))
  *   4) emitir log container_delivered y notificar al scheduler */
-/* ============================================================================
- * ARQUITECTURA BDI: +!execute_exit_task EN SUBFASES ATÓMICAS
- * ============================================================================
- * Cada subfase de salida es un plan con contexto de selección propio.
- * La observación del mundo ocurre al ELEGIR el plan, no durante su ejecución.
- * Si una subfase falla, su manejador -! identifica la fase y delega recuperación.
- * ============================================================================ */
-
-/* ---- Planes auxiliares BDI: recuperación de salida por contexto ---- */
-+!execute_exit_release_reservation(CId, _) : current_exit_info(CId, W, H, Weight, _, ShelfId) <-
-    !release_shelf(ShelfId, Weight, W*H).
-
-+!execute_exit_release_reservation(_, _) <- true.
-
-+!execute_exit_abort_notify(CId, Reason) <-
-    .my_name(Me);
-    .send(scheduler, tell, robot_error(Me, CId, Reason));
-    .broadcast(untell, claimed_exit(CId));
-    -claimed_exit(CId);
-    -current_exit(CId);
-    -current_exit_info(CId, _, _, _, _, _);
-    -+state(idle).
-
-+!execute_exit_abort(CId, Reason) <-
-    !execute_exit_release_reservation(CId, _);
-    !execute_exit_abort_notify(CId, Reason).
-
-+!execute_exit_abort_carrying(CId, Reason) <-
-    !execute_exit_abort(CId, Reason);
-    -carrying_exit(CId).
-
-+!execute_exit_abort_graceful(CId) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT] Container ", CId, " ya no disponible — abortando limpiamente");
-    .broadcast(untell, claimed_exit(CId));
-    .broadcast(tell, exit_done(CId));
-    -claimed_exit(CId);
-    -current_exit(CId);
-    -current_exit_info(CId, _, _, _, _, _);
-    -+state(idle);
-    .fail.
-
-/* Punto de entrada: delega a subfases (sin lógica secuencial en el cuerpo) */
 +!execute_exit_task(CId, W, H, Weight, Type, ShelfId) <-
     .my_name(Me);
-    .print("[", Me, "] [EXIT-INIT] Tarea salida iniciada para ", CId);
+    /* Escalonar la salida según bid_delay para evitar que todos los robots
+     * se muevan simultáneamente hacia la zona OUT y se bloqueen mutuamente.
+     * El robot con menor bid_delay (más prioritario) sale primero. */
     ?bid_delay(BD);
     StartDelay = BD / 4;
     .wait(StartDelay);
-    !execute_exit_validate_shelf(CId, ShelfId).
-
-/* ---- SUBFASE 1: Validar que el contenedor sigue en la shelf ---- */
-+!execute_exit_validate_shelf(CId, ShelfId) : stored_at(CId, ShelfId, _, _, _, _) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-1] Container validado en ", ShelfId);
-    !execute_exit_navigate_to_shelf(CId, ShelfId).
-
-+!execute_exit_validate_shelf(CId, ShelfId) : not stored_at(CId, ShelfId, _, _, _, _) <-
-    !execute_exit_abort_graceful(CId).
-
--!execute_exit_validate_shelf(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-1 ERROR] Validación shelf falló para ", CId);
-    !execute_exit_abort(CId, exit_shelf_validation_failed).
-
-/* ---- SUBFASE 2: Navegar a la estantería ---- */
-+!execute_exit_navigate_to_shelf(CId, ShelfId) <-
-    .my_name(Me);
+    /* Verificar que el container sigue existiendo en su shelf antes de salir */
+    if (not stored_at(CId, ShelfId, _, _, _, _)) {
+        .print("[", Me, "] container ", CId, " ya no en ", ShelfId, " — abortando exit");
+        .broadcast(untell, claimed_exit(CId));
+        .broadcast(tell, exit_done(CId));
+        /* Autolimpieza local: .broadcast no vuelve al emisor (ver nota en
+         * la rama de éxito más abajo). Sin esto, este robot podría quedarse
+         * con intending_exit(CId) o un stored_at(CId,...) residual y volver
+         * a intentar pujar/recoger el mismo contenedor indefinidamente. */
+        .abolish(stored_at(CId, _, _, _, _, _));
+        .abolish(intending_exit(CId));
+        -claimed_exit(CId);
+        -current_exit(CId);
+        -current_exit_info(CId, _, _, _, _, _);
+        -+state(idle);
+        .fail
+    };
     !get_shelf_dest(ShelfId, SX, SY);
-    .print("[", Me, "] [EXIT-PHASE-2] Navegando a shelf (", SX, ",", SY, ")");
     !go(SX, SY);
     .wait(100);
-    .print("[", Me, "] [EXIT-PHASE-2] Navegación completada");
-    !execute_exit_validate_shelf_second(CId, ShelfId).
-
--!execute_exit_navigate_to_shelf(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-2 ERROR] Navegación a shelf falló para ", CId);
-    !execute_exit_abort(CId, exit_navigation_to_shelf_failed).
-
-/* ---- SUBFASE 2B: Segunda validación antes de pickup ---- */
-+!execute_exit_validate_shelf_second(CId, ShelfId) : stored_at(CId, ShelfId, _, _, _, _) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-2B] Segunda validación OK");
-    !execute_exit_do_pickup(CId, ShelfId).
-
-+!execute_exit_validate_shelf_second(CId, ShelfId) : not stored_at(CId, ShelfId, _, _, _, _) <-
-    !execute_exit_abort_graceful(CId).
-
-/* ---- SUBFASE 3: Recoger de la estantería ---- */
-+!execute_exit_do_pickup(CId, ShelfId) : current_exit_info(CId, W, H, Weight, Type, _) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-3] Recogiendo de shelf ", ShelfId);
+    /* Segunda verificación justo antes del pickup: otro robot puede haber
+     * llegado primero y ya retirado el paquete. Si stored_at ya no existe,
+     * abortar limpiamente sin ir a la zona de salida. */
+    if (not stored_at(CId, ShelfId, _, _, _, _)) {
+        .print("[", Me, "] container ", CId, " ya recogido por otro robot — abortando");
+        .broadcast(untell, claimed_exit(CId));
+        .broadcast(tell, exit_done(CId));
+        .abolish(stored_at(CId, _, _, _, _, _));
+        .abolish(intending_exit(CId));
+        -claimed_exit(CId);
+        -current_exit(CId);
+        -current_exit_info(CId, _, _, _, _, _);
+        -+state(idle);
+        .fail
+    };
+    /* Recoger físicamente el contenedor de la estantería */
     pickup_from_shelf(CId, ShelfId);
     .wait(100);
-    Area = W*H;
-    !release_shelf(ShelfId, Weight, Area);
+    Area = W*H; !release_shelf(ShelfId, Weight, Area);
     -stored_at(CId, ShelfId, _, _, _, _);
+    /* NO broadcast untell stored_at: la unificación exacta de variables puede
+     * fallar en peers. La limpieza en peers se hace exclusivamente via exit_done. */
     +carrying_exit(CId);
-    .print("[", Me, "] [EXIT-PHASE-3] Pickup exitoso");
-    !execute_exit_navigate_to_drop_zone(CId).
-
--!execute_exit_do_pickup(CId, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-3 ERROR] Pickup de shelf falló para ", CId);
-    !execute_exit_abort(CId, exit_pickup_failed).
-
-/* ---- SUBFASE 4: Navegar a zona de salida ---- */
-+!execute_exit_navigate_to_drop_zone(CId) <-
-    .my_name(Me);
-    ?exit_drop_cell_robot(Me, EX, EY);
-    .print("[", Me, "] [EXIT-PHASE-4] Navegando a drop zone (", EX, ",", EY, ")");
+    /* Elegir celda de drop y RESERVARLA inmediatamente para que otros robots
+     * la vean ocupada antes de llegar físicamente (evita que dos robots
+     * elijan la misma celda y uno quede bloqueado con el contenedor). */
+    !pick_exit_drop_cell(Me, EX, EY);
+    !reserve_exit_cell(EX, EY);
     !move_to_exit_drop(EX, EY);
     .wait(100);
-    .print("[", Me, "] [EXIT-PHASE-4] Navegación a drop zone completada");
-    !execute_exit_do_drop(CId, EX, EY).
-
--!execute_exit_navigate_to_drop_zone(CId) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-4 ERROR] Navegación a drop zone falló para ", CId);
-    !execute_exit_abort_carrying(CId, exit_navigation_to_drop_failed).
-
-/* ---- SUBFASE 5: Depositar en zona de salida ---- */
-+!execute_exit_do_drop(CId, EX, EY) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-5] Depositando en drop zone (", EX, ",", EY, ")");
+    /* Depositar físicamente en la zona de salida */
     drop_at_exit(EX, EY);
+    !release_exit_cell(EX, EY);
     .wait(100);
-    .print("[", Me, "] [EXIT-PHASE-5] Drop exitoso");
-    !execute_exit_cleanup_success(CId).
-
--!execute_exit_do_drop(CId, EX, EY) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-5 ERROR] Drop en zona salida falló para ", CId);
-    !execute_exit_abort_carrying(CId, exit_drop_failed).
-
-/* ---- SUBFASE 6: Limpieza y notificación ---- */
-+!execute_exit_cleanup_success(CId) : current_exit_info(CId, _, _, _, Type, _) <-
-    .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-6] Limpieza y notificación para ", CId);
-    .time(HH, MM, SS);
-    .concat(HH, ":", MM, ":", SS, T);
+    .time(HH, MM, SS); .concat(HH, ":", MM, ":", SS, T);
     .print("EVENT | time=", T, " | agent=", Me, " | type=container_delivered | data=", CId);
     .send(scheduler, tell, container_at_exit(CId));
     .send(scheduler, tell, container_delivered(CId, Me, Type));
     .broadcast(untell, claimed_exit(CId));
     .broadcast(tell, exit_done(CId));
+    /* .broadcast no reenvía el mensaje al propio emisor: el handler
+     * +exit_done(CId)[source(_)] que limpia stored_at/claimed_exit/
+     * intending_exit en los peers NUNCA se dispara en este mismo robot.
+     * Sin esta limpieza local explícita, si quedaba un stored_at(CId,...)
+     * residual aquí (p.ej. recibido por broadcast cuando OTRO robot guardó
+     * el contenedor originalmente), este robot lo seguiría viendo como
+     * trabajo pendiente y volvería a pujar por un contenedor que él mismo
+     * acaba de entregar — pickup_from_shelf fallaría (container_not_in_shelf)
+     * y el ciclo se repetiría sin fin. */
     .abolish(exit_required(CId, _, _));
+    .abolish(stored_at(CId, _, _, _, _, _));
+    .abolish(intending_exit(CId));
     -claimed_exit(CId);
     -current_exit_info(CId, _, _, _, _, _);
     -carrying_exit(CId);
     ?base(BX, _);
-    ?exit_drop_cell_robot(Me, EX, EY);
     !go(EX, 2);
     !go(3, 2);
     !go(BX, 4);
-    .print("[", Me, "] [EXIT-COMPLETE] ", CId, " entregado y en base");
     -current_exit(CId);
     -+state(idle).
 
--!execute_exit_cleanup_success(CId) <-
+-!execute_exit_task(CId, _, _, _, _, _) <-
     .my_name(Me);
-    .print("[", Me, "] [EXIT-PHASE-6 ERROR] Limpieza falló para ", CId);
-    !execute_exit_abort_carrying(CId, exit_cleanup_failed).
+    .print("[", Me, "] FALLO tarea salida ", CId);
+    .send(scheduler, tell, robot_error(Me, CId, exit_failed));
+    .broadcast(untell, claimed_exit(CId));
+    /* Liberar reserva de celda si se había elegido ya */
+    if (exit_cell_taken(_, _, Me)) {
+        .findall(pair(X,Y), exit_cell_taken(X, Y, Me), Taken);
+        for (.member(pair(RX,RY), Taken)) {
+            !release_exit_cell(RX, RY)
+        }
+    };
+    /* Solo difundimos exit_done (y abolimos stored_at en todos los peers)
+     * si el contenedor confirmadamente ya no existe en ninguna shelf local
+     * — esa es la causa real de fallos como container_not_in_shelf, y es
+     * justo el caso que producía el bucle infinito (ver nota abajo). Si el
+     * fallo fue por otro motivo y el contenedor sigue almacenado, NO
+     * propagamos exit_done: hacerlo borraría un stored_at válido en todos
+     * los peers y dejaría el contenedor huérfano, sin que nadie vuelva a
+     * recogerlo nunca. */
+    if (not stored_at(CId, _, _, _, _, _)) {
+        .broadcast(tell, exit_done(CId))
+    };
+    /* CRÍTICO: container_not_in_shelf (lanzado por pickup_from_shelf cuando
+     * el contenedor ya no está físicamente, p.ej. porque este mismo robot ya
+     * lo entregó en una pasada anterior y se quedó con stored_at residual)
+     * cae en este handler genérico. Sin abolir stored_at/intending_exit
+     * localmente aquí, el robot vuelve a ver el mismo CId como trabajo
+     * pendiente en la siguiente iteración de check_exit_pending, vuelve a
+     * pujar, vuelve a ganar (sin rivales, porque los demás ya lo limpiaron
+     * vía exit_done) y vuelve a fallar: bucle infinito de pujar/fallar sin
+     * que el robot avance nunca. Esta limpieza local es independiente del
+     * broadcast condicional de arriba y siempre se ejecuta. */
+    .abolish(exit_required(CId, _, _));
+    .abolish(stored_at(CId, _, _, _, _, _));
+    .abolish(intending_exit(CId));
+    -claimed_exit(CId);
+    -current_exit(CId);
+    -current_exit_info(CId, _, _, _, _, _);
+    -carrying_exit(CId);
+    -+state(idle).
+
+/* ============================================================================
+ * ELECCIÓN DE CELDA DE DROP EN ZONA DE SALIDA
+ * Primaria si está libre (sin contenedor físico NI reservada por otro robot
+ * que ya viene en camino con carrying_exit). Si no, primera alternativa
+ * propia que cumpla lo mismo.
+ * Si TODAS están ocupadas o reservadas, esperamos y reevaluamos — transport
+ * vaciará la zona al terminar el deadline.
+ *
+ * Una celda está "reservada en tránsito" si otro robot (distinto de Me)
+ * tiene carrying_exit activo Y tiene esa celda como su exit_drop_cell_robot
+ * primaria o como primera alternativa libre elegida. Para simplificar sin
+ * acceso a estado interno de peers, usamos una creencia local
+ * exit_cell_reserved(X,Y) que cada robot añade al elegir su celda y elimina
+ * al hacer el drop. Esto permite coordinación ligera sin mensajes extra.
+ * ============================================================================ */
+
+/* Marcar/desmarcar reserva de celda de salida — se llama desde execute_exit_task */
+/* (los robots deben llamar a !reserve_exit_cell y !release_exit_cell) */
+
++!reserve_exit_cell(X, Y) <-
+    .my_name(Me);
+    .broadcast(tell, exit_cell_reserved(X, Y, Me)).
+
++!release_exit_cell(X, Y) <-
+    .my_name(Me);
+    .broadcast(tell, exit_cell_released(X, Y, Me)).
+
++exit_cell_reserved(X, Y, Peer)[source(_)] <-
+    +exit_cell_taken(X, Y, Peer);
+    -exit_cell_reserved(X, Y, Peer)[source(_)].
+
++exit_cell_released(X, Y, Peer)[source(_)] <-
+    .abolish(exit_cell_taken(X, Y, Peer));
+    -exit_cell_released(X, Y, Peer)[source(_)].
+
+/* Celda de salida libre: sin contenedor físico encima Y sin reserva de peer */
+exit_drop_free(X, Y) :-
+    not container_at(_, X, Y) & not exit_cell_taken(X, Y, _).
+
+/* Regla derivada: existe al menos una celda libre accesible en la zona de salida
+ * para este robot (primaria o alguna alternativa). Se usa como guarda antes de pujar. */
+exit_zone_has_free_cell(Me) :-
+    exit_drop_cell_robot(Me, PX, PY) & exit_drop_free(PX, PY).
+exit_zone_has_free_cell(Me) :-
+    exit_drop_cells_alt(Me, Alts) & .member(pair(AX, AY), Alts) & exit_drop_free(AX, AY).
+
++!pick_exit_drop_cell(Me, EX, EY)
+    : exit_drop_cell_robot(Me, PX, PY) & exit_drop_free(PX, PY) <-
+    EX = PX; EY = PY.
+
++!pick_exit_drop_cell(Me, EX, EY)
+    : exit_drop_cell_robot(Me, PX, PY) & not exit_drop_free(PX, PY)
+    & exit_drop_cells_alt(Me, Alts) <-
+    !find_free_exit_cell(Alts, EX, EY).
+
++!find_free_exit_cell([pair(CX,CY) | _], EX, EY)
+    : exit_drop_free(CX, CY) <-
+    EX = CX; EY = CY.
++!find_free_exit_cell([pair(_,_) | Rest], EX, EY) <-
+    !find_free_exit_cell(Rest, EX, EY).
++!find_free_exit_cell([], EX, EY) <-
+    .my_name(Me);
+    .print("[", Me, "] zona de salida llena, esperando hueco...");
+    .wait(500);
+    !pick_exit_drop_cell(Me, EX, EY).
 
 /* ============================================================================
  * MOVIMIENTO HACIA ZONA DE SALIDA
@@ -1347,21 +1269,33 @@ type_in_active_deadline(Type) :-
     .abolish(claimed(_));
     .abolish(bid_attempted(_));
     .abolish(intending_exit(_));
-    .abolish(last_pos(_,_));
-    .abolish(last_broadcast_pos(_, _)).
+    .abolish(last_pos(_,_)).
 
 -deadline_active(Group)[source(_)] <-
     .my_name(Me);
     .print("[", Me, "] Deadline finalizado: ", Group);
     .abolish(last_pos(_,_));
-    .abolish(last_broadcast_pos(_, _));
-    .abolish(no_shelf_available(_)).
+    .abolish(no_shelf_available(_));
+    .abolish(deadline_end_ms(_)).
+
+/* Recepción del instante de fin del deadline activo, enviado por el
+ * scheduler. Se usa para estimar si da tiempo a completar una entrega de
+ * salida (ver has_exit_time/estimate_exit_time_ms más abajo) antes de
+ * pujar por un contenedor. */
++deadline_end_ms(EndMs)[source(_)] <-
+    .abolish(deadline_end_ms(_));
+    +deadline_end_ms(EndMs).
 
 /* Cuando otro robot informa que un container de salida ya está hecho,
- * limpiamos claimed_exit, exit_required Y stored_at local para que ningún
- * robot vuelva a pujar por un paquete que ya fue entregado. */
+ * limpiamos claimed_exit, exit_required, stored_at e intending_exit local
+ * para que ningún robot vuelva a pujar por un paquete que ya fue entregado.
+ * intending_exit(CId) podía quedar huérfano si este robot seguía "pujando"
+ * (esperando su bid_delay en !bid_exit_if_free) cuando el ganador ya
+ * terminó la entrega; sin esta limpieza, !resolve_exit_bid podía evaluarse
+ * más tarde con una intención sobre un contenedor inexistente. */
 +exit_done(CId)[source(_)] <-
     .abolish(exit_required(CId, _, _));
     .abolish(claimed_exit(CId));
     .abolish(stored_at(CId, _, _, _, _, _));
+    .abolish(intending_exit(CId));
     -exit_done(CId)[source(_)].
