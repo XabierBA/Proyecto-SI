@@ -714,45 +714,11 @@ shelf_access_north("shelf_9", 14, 9).  shelf_access_south("shelf_9", 14, 13).
     .abolish(shelf_blocked(_));
     -+state(idle).
 
-/* Límite de reintentos de navegación: configurable. Si se supera, se
- * generará error(navigation_failed, pair(TX,TY)) para notificar y limpiar
- * el estado de navegación, permitiendo que nuevos planes se ejecuten. */
-nav_retry_limit(8).
-
-/* Incremento / seguimiento de intentos de navegación para un destino */
-+!nav_retry_inc(TX, TY) : nav_attempt(TX, TY, Old) & nav_retry_limit(L) <-
-    New = Old + 1;
-    .abolish(nav_attempt(TX, TY, _));
-    +nav_attempt(TX, TY, New);
-    .my_name(Me); .print("[", Me, "] intento_nav ", TX, ",", TY, " -> ", New);
-    if (New >= L) {
-        .print("[", Me, "] NAVIGATION FAILED to ", TX, ",", TY, " after ", New, " attempts");
-        .send(scheduler, tell, robot_error(Me, none, navigation_failed));
-        .broadcast(tell, navigation_failed(TX, TY, Me));
-        .abolish(nav_attempt(TX, TY, _));
-        .abolish(last_pos(_,_));
-        /* dejar que otros planes manejen el estado de tarea; sólo limpiamos
-         * la información de navegación local para evitar bloqueos */
-    }.
-
-+!nav_retry_inc(TX, TY) : nav_retry_limit(L) <-
-    .abolish(nav_attempt(TX, TY, _));
-    +nav_attempt(TX, TY, 1);
-    .my_name(Me); .print("[", Me, "] intento_nav ", TX, ",", TY, " -> 1");
-    if (1 >= L) {
-        .print("[", Me, "] NAVIGATION FAILED to ", TX, ",", TY, " after 1 attempt");
-        .send(scheduler, tell, robot_error(Me, none, navigation_failed));
-        .broadcast(tell, navigation_failed(TX, TY, Me));
-        .abolish(nav_attempt(TX, TY, _));
-        .abolish(last_pos(_,_));
-    }.
-
-/* Reintentos locales para moverse a una celda adyacente */
 +!go_adjacent(CX, CY) : walkable(CX, CY+1) <- !go(CX, CY+1).
 +!go_adjacent(CX, CY) : walkable(CX+1, CY) <- !go(CX+1, CY).
 +!go_adjacent(CX, CY) : walkable(CX-1, CY) <- !go(CX-1, CY).
 +!go_adjacent(CX, CY) : walkable(CX, CY-1) <- !go(CX, CY-1).
-+!go_adjacent(CX, CY) <- !nav_retry_inc(CX, CY); .wait(500); !go_adjacent(CX, CY).
++!go_adjacent(CX, CY) <- .wait(500); !go_adjacent(CX, CY).
 
 /* Anti-oscilación: last_pos registra la celda de origen antes de cada paso.
  * Las reglas excluyen last_pos como destino inmediato, evitando A->B->A.
@@ -766,14 +732,14 @@ nav_retry_limit(8).
 +!go(TX, TY) : position(MX, MY) & MY \== TY & walkable(MX+1, MY) & not last_pos(MX+1, MY) <- !do_step(MX, MY, MX+1, MY, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY-1) & not last_pos(MX, MY-1) <- !do_step(MX, MY, MX, MY-1, TX, TY).
 +!go(TX, TY) : position(MX, MY) & MX \== TX & walkable(MX, MY+1) & not last_pos(MX, MY+1) <- !do_step(MX, MY, MX, MY+1, TX, TY).
-+!go(TX, TY) <- .abolish(last_pos(_,_)); !nav_retry_inc(TX, TY); .wait(1000); !go(TX, TY).
++!go(TX, TY) <- .abolish(last_pos(_,_)); .wait(1000); !go(TX, TY).
 
 +!do_step(FX, FY, NX, NY, TX, TY) <-
     .abolish(last_pos(_,_)); +last_pos(FX, FY);
     ?step_wait(W); move_to(NX, NY); .wait(W); !go(TX, TY).
 
 -!do_step(_, _, _, _, TX, TY) <-
-    !nav_retry_inc(TX, TY); .wait(500); !go(TX, TY).
+    .wait(500); !go(TX, TY).
 
 /* ============================================================================
  * RETORNO A BASE
@@ -845,43 +811,6 @@ nav_retry_limit(8).
 +error(container_blocking, _) <- .wait(300).
 +error(Tipo, _) <- .my_name(Me); .send(scheduler, tell, robot_error(Me, none, Tipo)); -+state(idle).
 
-/* Navigation failure: limpiar estado relacionado con navegación para permitir
- * que nuevos planes tomen el relevo. Notificamos al scheduler y liberamos
- * reservas/claims si procede. */
-+error(navigation_failed, _) : state(busy) & current_container(CId) & target_shelf(Sh) & current_task_info(CId, W, H, Weight, Type) <-
-    .my_name(Me);
-    .print("[", Me, "] ERROR: navigation_failed durante tarea ", CId, " -> limpieza y notificación");
-    /* liberar reserva si existe */
-    !release_shelf(Sh, Weight, W*H);
-    .send(scheduler, tell, robot_error(Me, CId, navigation_failed));
-    .broadcast(untell, claimed(CId));
-    -claimed(CId); -current_container(CId); -target_shelf(Sh);
-    -current_task_info(CId, _, _, _, _);
-    -carrying(CId);
-    .abolish(shelf_blocked(_));
-    .abolish(last_pos(_,_));
-    .abolish(nav_attempt(_,_,_));
-    -+state(idle).
-
-+error(navigation_failed, _) : state(busy) & current_exit(CId) & current_exit_info(CId, W, H, Weight, Type, ShelfId) <-
-    .my_name(Me);
-    .print("[", Me, "] ERROR: navigation_failed durante exit task ", CId, " -> limpieza y notificación");
-    .send(scheduler, tell, robot_error(Me, CId, navigation_failed));
-    .broadcast(untell, claimed_exit(CId));
-    .abolish(intending_exit(CId));
-    -claimed_exit(CId); -current_exit(CId); -current_exit_info(CId, _, _, _, _, _);
-    .abolish(last_pos(_,_));
-    .abolish(nav_attempt(_,_,_));
-    -+state(idle).
-
-+error(navigation_failed, _) <-
-    .my_name(Me);
-    .print("[", Me, "] ERROR: navigation_failed (estado no busy) -> limpieza mínima");
-    .send(scheduler, tell, robot_error(Me, none, navigation_failed));
-    .abolish(last_pos(_,_));
-    .abolish(nav_attempt(_,_,_));
-    -+state(idle).
-
 /* ============================================================================
  * DESTINOS DE ESTANTERÍAS — lateral más cercano al robot
  * Para cada estantería se ofrecen los dos laterales (norte y sur).
@@ -905,12 +834,11 @@ nav_retry_limit(8).
     .my_name(Me);
     .print("[", Me, "] Sin datos de acceso para ", ShelfId, " - usando (10,1)");
     X = 10; Y = 1.
- 
- +robot_at(X,Y) <-
+
++robot_at(X,Y) <-
     -+position(X,Y);
-    /* Movimiento exitoso → reset contador de conflictos consecutivos y de reintentos de navegación */
+    /* Movimiento exitoso → reset contador de conflictos consecutivos */
     .abolish(conflict_count(_));
-    .abolish(nav_attempt(_,_,_));
     .my_name(Me);
     .broadcast(tell, peer_at_pos(Me, X, Y)).
 
