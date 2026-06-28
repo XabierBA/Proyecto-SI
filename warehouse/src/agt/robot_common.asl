@@ -1211,9 +1211,8 @@ exit_zone_has_free_cell(_) :-
     ?exit_drop_priority(Cells);
     !find_free_exit_cell(Cells, EX, EY).
 
-+!find_free_exit_cell([pair(CX,CY) | _], EX, EY)
-    : exit_drop_free(CX, CY) <-
-    EX = CX; EY = CY.
++!find_free_exit_cell([pair(CX,CY) | _], CX, CY)
+    : exit_drop_free(CX, CY) <- true.
 +!find_free_exit_cell([pair(_,_) | Rest], EX, EY) <-
     !find_free_exit_cell(Rest, EX, EY).
 +!find_free_exit_cell([], EX, EY) <-
@@ -1231,13 +1230,13 @@ exit_zone_has_free_cell(_) :-
  * ============================================================================ */
 
 +!move_to_exit_drop(EX, EY) <-
-    /* Paso 1: llegar al pasillo Y=4 (libre de shelves y bases) */
+    /* Paso 1: llegar al pasillo Y=4 */
     !go(0, 4);
-    /* Paso 2: bajar a Y=1 dentro de exit_zone */
-    !go(0, 1);
-    /* Paso 3: ajustar columna al drop */
-    !go(EX, 1);
-    /* Paso 4: ajustar fila al drop (EY=0 o EY=1) */
+    /* Paso 2: avanzar horizontalmente hasta la columna de destino en Y=4 */
+    !go(EX, 4);
+    /* Paso 3: subir a Y=2 (nunca pasa por celdas de drop de otras columnas) */
+    !go(EX, 2);
+    /* Paso 4: bajar directamente a la celda reservada */
     !go(EX, EY).
 
 /* Sincronización de deadline_active desde scheduler. */
