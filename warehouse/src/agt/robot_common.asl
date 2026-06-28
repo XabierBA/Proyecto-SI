@@ -60,11 +60,13 @@ blocked(1,3) :- current_exit(_) & not base(1,3).
 blocked(2,3) :- current_exit(_) & not base(2,3).
 blocked(3,3) :- current_exit(_) & not base(3,3).
 blocked(4,3) :- current_exit(_) & not base(4,3).
-/* Y=0 e Y=1 bloqueados, salvo zona de salida cuando ejecutamos tarea de salida.
- * Importante: durante una tarea de entrada, la zona de salida también está
- * bloqueada (sería una "trampa" porque desde X=2,Y=1 no se puede ir a X=3,Y=1). */
-blocked(X,Y) :- X >= 0 & X <= 6 & Y == 0 & not (is_exit_zone(X,Y) & current_exit(_)).
-blocked(X,Y) :- X >= 0 & X <= 7 & Y == 1 & not (is_exit_zone(X,Y) & current_exit(_)).
+/* Y=0 e Y=1: solo bloqueados DURANTE la fase de salida (current_exit activo).
+ * En fase normal los robots necesitan transitar por estas celdas para llegar
+ * a estanterías bajas (shelf_1..4), por lo que no deben estar bloqueadas.
+ * Durante salida: solo la exit_zone (X<=2) es accesible; el resto bloqueado.
+ * La entry zone y class zone tienen sus propias reglas más abajo. */
+blocked(X,Y) :- current_exit(_) & X >= 0 & X <= 6 & Y == 0 & not is_exit_zone(X,Y).
+blocked(X,Y) :- current_exit(_) & X >= 0 & X <= 7 & Y == 1 & not is_exit_zone(X,Y).
 /* Bloquear explícitamente entry y class zone aunque alguna celda no caiga
  * en las reglas anteriores (ej: (7,0) que es entry zone pero X>6 Y=0). */
 blocked(X,Y) :- is_entry_zone(X,Y) & not state(busy).
@@ -180,6 +182,13 @@ has_exit_work :-
 has_exit_work :-
     deadline_active(nonurgent) & stored_at(CId, _, _, _, _, Type)
     & (Type == "standard" | Type == "fragile") & not claimed_exit(CId).
+
+/* Regla derivada: un robot heavy ha alcanzado su límite de 2 entregas no urgentes
+ * en este deadline. Solo aplica a robots con capacidad 2x3 (heavy y heavy_2).
+ * Los robots light y medium no tienen restricción (su capacidad ya los limita
+ * de forma natural). */
+heavy_nonurgent_limit_reached :-
+    my_capacity(_, 2, 3) & nonurgent_exit_count(N) & N >= 2.
 
 /* Volver a base paso a paso. En cada paso comprueba si está idle y no en base.
  * Si llega un pending compatible, check_pending lo cogerá en la siguiente iter
@@ -910,17 +919,22 @@ abs_diff(A, B, D) :- A < B & D = B - A.
     & not claimed_exit(CId) & not intending_exit(CId)
     & deadline_end_ms(EndMs) <-
     .my_name(Me);
-    /* Guarda 1: solo pujar si hay hueco libre (sin contenedor ni reserva de peer) */
-    if (not exit_zone_has_free_cell(Me)) {
-        .print("[", Me, "] Zona de salida sin hueco accesible — no cojo ", CId)
+    /* Guarda 0: robots heavy limitan a 2 entregas en el deadline de no urgentes */
+    if (deadline_active(nonurgent) & heavy_nonurgent_limit_reached) {
+        .print("[", Me, "] Límite de 2 entregas no urgentes alcanzado — no cojo más")
     } else {
-        /* Guarda 2: solo pujar si hay tiempo suficiente */
-        !estimate_exit_time_ms(Me, ShelfId, EstMs);
-        .time(HH, MM, SS); NowMs = HH*3600000 + MM*60000 + SS*1000;
-        if (NowMs + EstMs <= EndMs) {
-            !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+        /* Guarda 1: solo pujar si hay hueco libre (sin contenedor ni reserva de peer) */
+        if (not exit_zone_has_free_cell(Me)) {
+            .print("[", Me, "] Zona de salida sin hueco accesible — no cojo ", CId)
         } else {
-            .print("[", Me, "] Sin tiempo para entregar ", CId, " antes del deadline — descartado")
+            /* Guarda 2: solo pujar si hay tiempo suficiente */
+            !estimate_exit_time_ms(Me, ShelfId, EstMs);
+            .time(HH, MM, SS); NowMs = HH*3600000 + MM*60000 + SS*1000;
+            if (NowMs + EstMs <= EndMs) {
+                !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+            } else {
+                .print("[", Me, "] Sin tiempo para entregar ", CId, " antes del deadline — descartado")
+            }
         }
     }.
 
@@ -934,10 +948,15 @@ abs_diff(A, B, D) :- A < B & D = B - A.
     & not claimed_exit(CId) & not intending_exit(CId)
     & not deadline_end_ms(_) <-
     .my_name(Me);
-    if (exit_zone_has_free_cell(Me)) {
-        !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+    /* Guarda 0: robots heavy limitan a 2 entregas en el deadline de no urgentes */
+    if (deadline_active(nonurgent) & heavy_nonurgent_limit_reached) {
+        .print("[", Me, "] Límite de 2 entregas no urgentes alcanzado — no cojo más")
     } else {
-        .print("[", Me, "] Zona de salida sin hueco (sin deadline_end_ms) — no cojo ", CId)
+        if (exit_zone_has_free_cell(Me)) {
+            !bid_exit_if_free(CId, W, H, Weight, Type, ShelfId)
+        } else {
+            .print("[", Me, "] Zona de salida sin hueco (sin deadline_end_ms) — no cojo ", CId)
+        }
     }.
 
 +!check_exit_pending <- true.
@@ -1008,6 +1027,15 @@ abs_diff(A, B, D) :- A < B & D = B - A.
         -+state(busy);
         +current_exit(CId);
         +current_exit_info(CId, W, H, Weight, Type, ShelfId);
+        /* Contabilizar entregas no urgentes para robots heavy (límite = 2) */
+        if ((Type == "standard" | Type == "fragile") & my_capacity(_, 2, 3)) {
+            if (nonurgent_exit_count(NC)) {
+                NC1 = NC + 1; -nonurgent_exit_count(NC); +nonurgent_exit_count(NC1)
+            } else {
+                NC1 = 1; +nonurgent_exit_count(1)
+            };
+            .print("[", Me, "] Entregas no urgentes este deadline: ", NC1, "/2")
+        };
         .print("[", Me, "] Subasta SALIDA ganada: ", CId);
         !execute_exit_task(CId, W, H, Weight, Type, ShelfId)
     } else {
@@ -1244,19 +1272,69 @@ exit_zone_has_free_cell(_) :-
 +deadline_active(Group)[source(_)] <-
     .my_name(Me);
     .print("[", Me, "] Deadline activo: ", Group);
+    /* Limpiar todo del ciclo de entrada al entrar en deadline */
     .abolish(pending_container(_, _, _, _, _));
     .abolish(intending(_));
     .abolish(claimed(_));
     .abolish(bid_attempted(_));
     .abolish(intending_exit(_));
-    .abolish(last_pos(_,_)).
+    .abolish(last_pos(_,_));
+    /* Si había una tarea de entrada en curso (robot busy con current_container)
+     * pero aún sin haber recogido el paquete (not carrying), abortar limpiamente:
+     * liberar reserva de estantería y resetear creencias de tarea. */
+    if (current_container(CId) & not carrying(CId) & current_task_info(CId, W, H, Weight, _)) {
+        .print("[", Me, "] Deadline interrumpe tarea entrada: ", CId, " — limpiando");
+        if (target_shelf(Sh)) {
+            !release_shelf(Sh, Weight, W*H)
+        };
+        .abolish(current_container(_));
+        .abolish(current_task_info(_, _, _, _, _));
+        .abolish(target_shelf(_));
+        .abolish(shelf_blocked(_));
+        .abolish(preempt_pending(_));
+        -+state(idle)
+    }.
 
 -deadline_active(Group)[source(_)] <-
     .my_name(Me);
     .print("[", Me, "] Deadline finalizado: ", Group);
+    /* ── Limpieza navegación ── */
     .abolish(last_pos(_,_));
     .abolish(no_shelf_available(_));
-    .abolish(deadline_end_ms(_)).
+    .abolish(deadline_end_ms(_));
+    /* ── Limpieza ciclo de SALIDA: creencias que pueden quedar si el
+     * deadline termina mientras el robot está en mitad de una tarea
+     * de salida o si quedaron residuos de subastas no completadas. ── */
+    .abolish(claimed_exit(_));
+    .abolish(intending_exit(_));
+    .abolish(exit_required(_, _, _));
+    .abolish(exit_cell_taken(_, _, _));
+    /* current_exit, current_exit_info y carrying_exit solo se limpian
+     * si el robot NO está ejecutando activamente una tarea de salida
+     * (state(idle) indica que ya terminó o abortó). Si está busy aún
+     * terminando la entrega, no tocamos esas creencias para no romper
+     * la ejecución en curso. */
+    if (not current_exit(_) | state(idle)) {
+        .abolish(current_exit(_));
+        .abolish(current_exit_info(_, _, _, _, _, _));
+        .abolish(carrying_exit(_))
+    };
+    /* ── Limpieza ciclo de ENTRADA: creencias que pueden haber quedado
+     * de tareas interrumpidas al arrancar el deadline. ── */
+    .abolish(preempt_pending(_));
+    /* Resetear contadores de entregas al finalizar cada deadline */
+    if (Group == nonurgent) {
+        .abolish(nonurgent_exit_count(_))
+    };
+    if (Group == urgent) {
+        .abolish(urgent_exit_count(_))
+    };
+    /* Si el robot quedó busy sin tarea activa (creencias de tarea
+     * limpiadas pero state no reseteado), forzar vuelta a idle. */
+    if (state(busy) & not current_container(_) & not current_exit(_)) {
+        .print("[", Me, "] Deadline fin: robot busy sin tarea — forzando idle");
+        -+state(idle)
+    }.
 
 /* Recepción del instante de fin del deadline activo, enviado por el
  * scheduler. Se usa para estimar si da tiempo a completar una entrega de
