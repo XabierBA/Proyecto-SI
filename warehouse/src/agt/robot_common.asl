@@ -15,27 +15,12 @@ returning(no).
 
 /* Estanterías con paquetes en proceso - se añaden dinámicamente vía +shelf_in_progress */
 
-/* --- Celdas de salida por robot (evitar colisiones) ---
- * Cada robot tiene una celda PRIMARIA (igual reparto que antes, sin cambios
- * de comportamiento en el caso normal de 1 entrega por robot y deadline) más
- * celdas ALTERNATIVAS propias. transport solo retira los contenedores al
- * FINAL del deadline completo (no de forma continua), así que si un mismo
- * robot entrega 2+ contenedores en el mismo ciclo de salida, su celda
- * primaria sigue físicamente ocupada por la entrega anterior. Sin una
- * alternativa, el robot llega a !move_to_exit_drop y el último !go(EX,EY)
- * nunca puede completarse (container_blocked(EX,EY) hace esa celda no-walkable
- * para siempre), dejando al robot detenido con carrying_exit puesto
- * indefinidamente. Las 6 celdas de is_exit_zone (X 0-2, Y 0-1) se reparten
- * en 4 primarias + 2 compartidas como alternativa de desbordamiento. */
-exit_drop_cell_robot(robot_light, 0, 0).
-exit_drop_cell_robot(robot_medium, 1, 0).
-exit_drop_cell_robot(robot_heavy, 2, 0).
-exit_drop_cell_robot(robot_heavy_2, 2, 1).
-
-exit_drop_cells_alt(robot_light,    [pair(0,1), pair(1,1), pair(2,1), pair(1,0), pair(2,0)]).
-exit_drop_cells_alt(robot_medium,   [pair(1,1), pair(0,1), pair(2,1), pair(0,0), pair(2,0)]).
-exit_drop_cells_alt(robot_heavy,    [pair(2,1), pair(1,1), pair(0,1), pair(0,0), pair(1,0)]).
-exit_drop_cells_alt(robot_heavy_2,  [pair(2,0), pair(1,0), pair(0,0), pair(0,1), pair(1,1)]).
+/* --- Celdas de salida: orden global de prioridad (izq→der, fila sup→inf) ---
+ * Todos los robots comparten la misma lista de prioridad. El primero en llegar
+ * ocupa (0,0), el siguiente (1,0), luego (2,0), (0,1), (1,1) y finalmente (2,1).
+ * La elección se hace en tiempo real según qué celdas estén libres y sin reserva,
+ * garantizando que la zona quede compacta arriba-a-la-izquierda. */
+exit_drop_priority([pair(0,0), pair(1,0), pair(2,0), pair(0,1), pair(1,1), pair(2,1)]).
 
 /* --- Mapa de estanterías --- */
 shelf_cell(10,2). shelf_cell(11,2). shelf_cell(10,3). shelf_cell(11,3).
@@ -910,7 +895,8 @@ abs_diff(A, B, D) :- A < B & D = B - A.
     abs_diff(RX, SX, DXS); abs_diff(RY, SY, DYS); DistS = DXS + DYS;
     if (DistN <= DistS) { DistToShelf = DistN; AX = NX; AY = NY }
     else { DistToShelf = DistS; AX = SX; AY = SY };
-    ?exit_drop_cell_robot(Me, EX, EY);
+    /* Referencia conservadora: usamos (0,0), primera celda de la lista de prioridad */
+    EX = 0; EY = 0;
     abs_diff(AX, EX, DXB); abs_diff(AY, EY, DYB); DistBack = DXB + DYB;
     TotalCells = DistToShelf + DistBack;
     ?step_wait(SW);
@@ -1178,18 +1164,14 @@ abs_diff(A, B, D) :- A < B & D = B - A.
 
 /* ============================================================================
  * ELECCIÓN DE CELDA DE DROP EN ZONA DE SALIDA
- * Primaria si está libre (sin contenedor físico NI reservada por otro robot
- * que ya viene en camino con carrying_exit). Si no, primera alternativa
- * propia que cumpla lo mismo.
- * Si TODAS están ocupadas o reservadas, esperamos y reevaluamos — transport
+ * Se usa una lista global de prioridad compartida por todos los robots:
+ *   (0,0) → (1,0) → (2,0) → (0,1) → (1,1) → (2,1)
+ * El primer robot en ejecutar !pick_exit_drop_cell toma (0,0); el siguiente
+ * toma (1,0), etc. Así la zona queda compacta arriba-a-la-izquierda.
+ * La reserva vía !reserve_exit_cell (broadcast) garantiza que dos robots
+ * que eligen simultáneamente no elijan la misma celda.
+ * Si TODAS están ocupadas o reservadas, se espera y se reevalúa — transport
  * vaciará la zona al terminar el deadline.
- *
- * Una celda está "reservada en tránsito" si otro robot (distinto de Me)
- * tiene carrying_exit activo Y tiene esa celda como su exit_drop_cell_robot
- * primaria o como primera alternativa libre elegida. Para simplificar sin
- * acceso a estado interno de peers, usamos una creencia local
- * exit_cell_reserved(X,Y) que cada robot añade al elegir su celda y elimina
- * al hacer el drop. Esto permite coordinación ligera sin mensajes extra.
  * ============================================================================ */
 
 /* Marcar/desmarcar reserva de celda de salida — se llama desde execute_exit_task */
@@ -1215,21 +1197,19 @@ abs_diff(A, B, D) :- A < B & D = B - A.
 exit_drop_free(X, Y) :-
     not container_at(_, X, Y) & not exit_cell_taken(X, Y, _).
 
-/* Regla derivada: existe al menos una celda libre accesible en la zona de salida
- * para este robot (primaria o alguna alternativa). Se usa como guarda antes de pujar. */
-exit_zone_has_free_cell(Me) :-
-    exit_drop_cell_robot(Me, PX, PY) & exit_drop_free(PX, PY).
-exit_zone_has_free_cell(Me) :-
-    exit_drop_cells_alt(Me, Alts) & .member(pair(AX, AY), Alts) & exit_drop_free(AX, AY).
+/* Regla derivada: existe al menos una celda libre en la zona de salida (global).
+ * La identidad del robot ya no importa para decidir si hay hueco — todos comparten
+ * la misma lista de 6 celdas. Se usa como guarda antes de pujar. */
+exit_zone_has_free_cell(_) :-
+    exit_drop_priority(Cells) & .member(pair(X, Y), Cells) & exit_drop_free(X, Y).
 
-+!pick_exit_drop_cell(Me, EX, EY)
-    : exit_drop_cell_robot(Me, PX, PY) & exit_drop_free(PX, PY) <-
-    EX = PX; EY = PY.
-
-+!pick_exit_drop_cell(Me, EX, EY)
-    : exit_drop_cell_robot(Me, PX, PY) & not exit_drop_free(PX, PY)
-    & exit_drop_cells_alt(Me, Alts) <-
-    !find_free_exit_cell(Alts, EX, EY).
+/* Elegir la primera celda libre de la lista global de prioridad.
+ * Todos los robots usan el mismo orden: (0,0)→(1,0)→(2,0)→(0,1)→(1,1)→(2,1).
+ * La celda queda reservada vía !reserve_exit_cell justo después de este plan,
+ * así que la siguiente subasta ya no la verá como libre. */
++!pick_exit_drop_cell(Me, EX, EY) <-
+    ?exit_drop_priority(Cells);
+    !find_free_exit_cell(Cells, EX, EY).
 
 +!find_free_exit_cell([pair(CX,CY) | _], EX, EY)
     : exit_drop_free(CX, CY) <-
